@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyDecisions,
   batchCalls,
+  backendMarker,
   buildJevRequest,
   collectToolCalls,
   compact,
@@ -12,6 +13,7 @@ import {
   JevClient,
   parseJevResponse,
   reductionRatio,
+  resolveBaseUrl,
   resolveOptions,
   type HistoryToolCall,
   type JevAsker,
@@ -429,5 +431,37 @@ describe('HTTP client', () => {
     await expect(
       compactMessages(transcript(), { apiKey: '', preserveRecentMessages: 1 }),
     ).rejects.toThrow(/TYPESAFE_API_KEY/);
+  });
+
+  it('resolves baseUrl: unset/empty stays unset, valid http(s) passes through, anything else is rejected', () => {
+    expect(resolveBaseUrl(undefined)).toEqual({});
+    expect(resolveBaseUrl('')).toEqual({});
+    expect(resolveBaseUrl('   ')).toEqual({});
+    expect(resolveBaseUrl('http://127.0.0.1:8000/v1/systemone')).toEqual({
+      baseUrl: 'http://127.0.0.1:8000/v1/systemone',
+    });
+    expect(resolveBaseUrl('https://laya.example.com/v1/systemone?x=1')).toEqual({
+      baseUrl: 'https://laya.example.com/v1/systemone?x=1',
+    });
+    expect(resolveBaseUrl('https://laya.example.com/v1/systemone/')).toEqual({
+      baseUrl: 'https://laya.example.com/v1/systemone/',
+    });
+    expect(resolveBaseUrl('localhost:8000/v1/systemone')).toEqual({
+      invalidBaseUrl: 'localhost:8000/v1/systemone',
+    });
+    expect(resolveBaseUrl('ftp://127.0.0.1:8000')).toEqual({ invalidBaseUrl: 'ftp://127.0.0.1:8000' });
+    expect(resolveBaseUrl('not a url')).toEqual({ invalidBaseUrl: 'not a url' });
+  });
+
+  it('formats a backend marker from a URL, or the raw value when it is not one', () => {
+    expect(backendMarker('https://api.typesafe.ai/v1/systemone', 'jev-latest')).toBe(
+      'api.typesafe.ai jev-latest',
+    );
+    expect(backendMarker('http://127.0.0.1:8000/v1/systemone', 'typed-decisions')).toBe(
+      '127.0.0.1:8000 typed-decisions',
+    );
+    expect(backendMarker('localhost:8000/v1/systemone', 'jev-latest')).toBe(
+      'localhost:8000/v1/systemone jev-latest',
+    );
   });
 });

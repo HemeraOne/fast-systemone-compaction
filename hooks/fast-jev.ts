@@ -9,7 +9,14 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import {
+  backendMarker,
+  buildJevRequest,
+  DEFAULT_MODEL,
+  parseJevResponse,
+  resolveBaseUrl,
+  SYSTEM_ONE_URL,
+} from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -45,6 +52,8 @@ export type HookConfig = CompactOptions & {
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
+  baseUrl?: string;
+  invalidBaseUrl?: string;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -84,14 +93,15 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   if (apiKey) config.apiKey = apiKey;
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
+  Object.assign(config, resolveBaseUrl(optionString(options, 'baseUrl')));
   return config;
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
-export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): JevAsker {
+export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string, baseUrl?: string): JevAsker {
   return {
     async ask(state, questions) {
-      const request = buildJevRequest({ apiKey, model }, state, questions);
+      const request = buildJevRequest({ apiKey, model, baseUrl }, state, questions);
       const response = await fetchFn(request.url, {
         method: request.method,
         headers: request.headers,
@@ -167,8 +177,17 @@ export async function compactSession(
   config: HookConfig,
   fetchFn: HookFetch,
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  if (config.invalidBaseUrl) {
+    throw new Error(`invalid baseUrl: ${config.invalidBaseUrl}`);
+  }
+  if (!config.apiKey) {
+    throw new Error('System One API key is not configured (set the apiKey option or TYPESAFE_API_KEY)');
+  }
+  const result = await compact(
+    messages,
+    jevAsker(fetchFn, config.apiKey, config.model, config.baseUrl),
+    config,
+  );
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -259,8 +278,14 @@ function notify(
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
+  let loggedInvalidBaseUrl = false;
 
   on('session.compact', async ($, event, next) => {
+    if (configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
+      loggedInvalidBaseUrl = true;
+      $.ui.log(`invalid baseUrl, falling back to the built-in summary: ${configured.invalidBaseUrl}`);
+    }
+    const marker = backendMarker(configured.invalidBaseUrl ?? configured.baseUrl ?? SYSTEM_ONE_URL, configured.model);
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
@@ -271,25 +296,29 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
+          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)}) [${marker}]`,
         );
         return next(event);
       }
       notify(
         $,
-        `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
+        `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)}) [${marker}]`,
       );
       return { messages };
     } catch (error) {
       notify(
         $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
+        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)}) [${marker}]`,
       );
       return next(event);
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    if (configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
+      loggedInvalidBaseUrl = true;
+      $.ui.log(`invalid baseUrl, falling back to the built-in summary: ${configured.invalidBaseUrl}`);
+    }
     if (compacting) return next(event);
     try {
       const { context } = await $.session.usage();

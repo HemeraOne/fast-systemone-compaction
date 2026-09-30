@@ -3,11 +3,46 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  jevAsker,
+  register,
   resolveHookConfig,
   summarize,
   toSessionMessages,
 } from '../hooks/fast-jev.ts';
-import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
+import { applyDecisions, backendMarker, collectToolCalls, decideCall, type Message } from '../src/index.js';
+import type { PluginOptions } from 'claude-code';
+
+type EventHandler = (
+  $: Record<string, unknown>,
+  event: Record<string, unknown>,
+  next: (event: unknown) => unknown,
+) => unknown;
+
+/** Captures `register`'s `on(...)` calls so a handler can be invoked directly in a test. */
+function registerHandlers(options: PluginOptions): Map<string, EventHandler> {
+  const handlers = new Map<string, EventHandler>();
+  const on = ((pattern: string, hook: EventHandler) => {
+    handlers.set(pattern, hook);
+  }) as unknown as Parameters<typeof register>[0];
+  register(on, options);
+  return handlers;
+}
+
+function fakeEngine(overrides: Record<string, unknown> = {}) {
+  const logs: string[] = [];
+  const toasts: string[] = [];
+  return {
+    logs,
+    toasts,
+    $: {
+      ui: { log: (text: string) => logs.push(text), toast: (text: string) => toasts.push(text) },
+      env: { get: async () => undefined },
+      settings: { read: async () => ({}) },
+      http: { fetch: async () => ({ status: 500, ok: false, text: 'unused' }) },
+      ...overrides,
+    },
+  };
+}
 
 type SessionMessage = Message & { handle?: string };
 
@@ -64,6 +99,24 @@ describe('hook config', () => {
       goal: 'g',
       compactAtPercent: 60,
       minReductionRatio: 0.25,
+    });
+  });
+
+  it('resolves a configured baseUrl onto the config', () => {
+    expect(resolveHookConfig({ baseUrl: 'http://127.0.0.1:8000/v1/systemone' })).toEqual({
+      compactAtPercent: 60,
+      minReductionRatio: 0.25,
+      model: 'jev-latest',
+      baseUrl: 'http://127.0.0.1:8000/v1/systemone',
+    });
+  });
+
+  it('rejects an invalid baseUrl onto the config instead of silently defaulting', () => {
+    expect(resolveHookConfig({ baseUrl: 'localhost:8000/v1/systemone' })).toEqual({
+      compactAtPercent: 60,
+      minReductionRatio: 0.25,
+      model: 'jev-latest',
+      invalidBaseUrl: 'localhost:8000/v1/systemone',
     });
   });
 });
@@ -145,5 +198,132 @@ describe('compactSession', () => {
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
     ).rejects.toThrow(/500/);
+  });
+
+  it('sends requests to the configured baseUrl and model instead of TypeSafe', async () => {
+    const urls: string[] = [];
+    const config = {
+      ...resolveHookConfig({ preserveRecentMessages: 1, baseUrl: 'http://127.0.0.1:8000/v1/systemone', model: 'typed-decisions' }),
+      apiKey: 'local',
+    };
+    await compactSession(transcript(), config, async (url, init) => {
+      urls.push(url);
+      const asker = jevFetch(() => 0.9);
+      return asker(url, init);
+    });
+    expect(urls).toEqual(['http://127.0.0.1:8000/v1/systemone']);
+  });
+
+  it('pins the default TypeSafe URL when baseUrl is unset (regression guard)', async () => {
+    const urls: string[] = [];
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
+    await compactSession(transcript(), config, async (url, init) => {
+      urls.push(url);
+      const asker = jevFetch(() => 0.9);
+      return asker(url, init);
+    });
+    expect(urls).toEqual(['https://api.typesafe.ai/v1/systemone']);
+  });
+
+  it('still falls back on a non-2xx response when baseUrl is configured', async () => {
+    const config = {
+      ...resolveHookConfig({ preserveRecentMessages: 1, baseUrl: 'http://127.0.0.1:8000/v1/systemone' }),
+      apiKey: 'local',
+    };
+    await expect(
+      compactSession(transcript(), config, async () => ({ status: 503, ok: false, text: 'down' })),
+    ).rejects.toThrow(/503/);
+  });
+
+  it('rejects an invalid baseUrl before making any request', async () => {
+    const config = resolveHookConfig({ preserveRecentMessages: 1, baseUrl: 'localhost:8000/v1/systemone', apiKey: 'k' });
+    await expect(
+      compactSession(transcript(), config, () => {
+        throw new Error('fetch must not be called for an invalid baseUrl');
+      }),
+    ).rejects.toThrow(/invalid.*localhost:8000\/v1\/systemone/i);
+  });
+});
+
+describe('register', () => {
+  it('logs the invalid baseUrl once, at the first handled event', async () => {
+    const handlers = registerHandlers({ baseUrl: 'localhost:8000/v1/systemone', apiKey: 'k' });
+    const { $, logs } = fakeEngine({ session: { usage: async () => ({ context: { percent: 10 } }) } });
+    const next = (event: unknown) => event;
+
+    await handlers.get('turn.complete')!($, {}, next);
+    await handlers.get('turn.complete')!($, {}, next);
+
+    expect(logs.filter((line) => line.includes('invalid baseUrl'))).toHaveLength(1);
+    expect(logs.some((line) => line.includes('localhost:8000/v1/systemone'))).toBe(true);
+  });
+
+  it('tags the fallback outcome with the raw invalid baseUrl instead of a host', async () => {
+    const handlers = registerHandlers({ baseUrl: 'localhost:8000/v1/systemone', apiKey: 'k' });
+    const { $, toasts } = fakeEngine();
+    const next = (event: unknown) => event;
+
+    await handlers.get('session.compact')!($, { messages: transcript() }, next);
+
+    expect(toasts[0]).toContain('localhost:8000/v1/systemone');
+  });
+
+  it('tags a successful outcome with the configured backend host and model', async () => {
+    const handlers = registerHandlers({
+      baseUrl: 'http://127.0.0.1:8000/v1/systemone',
+      model: 'typed-decisions',
+      apiKey: 'local',
+      preserveRecentMessages: 1,
+    });
+    const { $, toasts } = fakeEngine({
+      http: { fetch: jevFetch(() => 0.9) },
+    });
+    const next = (event: unknown) => event;
+
+    await handlers.get('session.compact')!($, { messages: transcript() }, next);
+
+    expect(toasts[0]).toContain(backendMarker('http://127.0.0.1:8000/v1/systemone', 'typed-decisions'));
+  });
+
+  it('tags the default-endpoint outcome with the TypeSafe host', async () => {
+    const handlers = registerHandlers({ apiKey: 'k', preserveRecentMessages: 1 });
+    const { $, toasts } = fakeEngine({ http: { fetch: jevFetch(() => 0) } });
+    const next = (event: unknown) => event;
+
+    await handlers.get('session.compact')!($, { messages: transcript() }, next);
+
+    expect(toasts[0]).toContain('api.typesafe.ai');
+  });
+
+  it('tags the below-minimum-reduction fallback outcome with the backend marker', async () => {
+    const baseUrl = 'http://127.0.0.1:8000/v1/systemone';
+    const handlers = registerHandlers({
+      baseUrl,
+      model: 'typed-decisions',
+      apiKey: 'local',
+      preserveRecentMessages: 1,
+      minReductionRatio: 0.99,
+    });
+    const { $, toasts } = fakeEngine({ http: { fetch: jevFetch(() => 0.9) } });
+    const next = (event: unknown) => event;
+
+    await handlers.get('session.compact')!($, { messages: transcript() }, next);
+
+    expect(toasts[0]).toContain('below');
+    expect(toasts[0]).toContain(backendMarker(baseUrl, 'typed-decisions'));
+  });
+
+  it('tags the backend-error fallback outcome with the backend marker', async () => {
+    const baseUrl = 'http://127.0.0.1:8000/v1/systemone';
+    const handlers = registerHandlers({ baseUrl, model: 'typed-decisions', apiKey: 'local', preserveRecentMessages: 1 });
+    const { $, toasts } = fakeEngine({
+      http: { fetch: async () => ({ status: 503, ok: false, text: 'down' }) },
+    });
+    const next = (event: unknown) => event;
+
+    await handlers.get('session.compact')!($, { messages: transcript() }, next);
+
+    expect(toasts[0]).toContain('503');
+    expect(toasts[0]).toContain(backendMarker(baseUrl, 'typed-decisions'));
   });
 });
