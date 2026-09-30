@@ -95,9 +95,17 @@ below can be used instead of TypeSafe — for example a local Laya server
 speaking its first model, `typed-decisions`. To try it:
 
 ```sh
-laya serve --model typed-decisions --port 8000
+pip install "laya[serve]"
+LAYA_HOST=127.0.0.1 LAYA_MODELS=typed-decisions LAYA_API_KEY=local laya-serve   # listens on :8000
 CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ```
+
+`laya-serve` is configured through `LAYA_*` environment variables (`LAYA_HOST`,
+`LAYA_PORT`, `LAYA_MODELS`, `LAYA_API_KEY`, `LAYA_DEVICE`); it binds `0.0.0.0` by
+default, so set `LAYA_HOST=127.0.0.1` for local use. `LAYA_MODELS=typed-decisions`
+preloads only that checkpoint. On a managed Windows machine where the
+`laya-serve.exe` launcher is blocked, run
+`python -c "from laya.serve import main; main()"` instead.
 
 Set these plugin options:
 
