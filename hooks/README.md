@@ -48,6 +48,7 @@ The plugin declares these `userConfig` values in
 
 | Option | Default |
 | --- | ---: |
+| `baseUrl` | *(unset → TypeSafe)* |
 | `keepThreshold` | `0.5` |
 | `preserveRecentMessages` | `6` |
 | `compactAtPercent` | `60` |
@@ -57,9 +58,22 @@ The plugin declares these `userConfig` values in
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
 
-The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
+The System One key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
+
+`baseUrl` points compaction requests at any Jev-compatible System One
+endpoint instead of TypeSafe — see "Self-hosted / local Laya" below. Leave it
+unset, empty, or whitespace to keep using TypeSafe; this is the default and
+existing behaviour, unchanged by setting nothing. A non-empty value that is
+not an absolute `http://` or `https://` URL (e.g. a missing scheme or a typo)
+is rejected: no request is sent anywhere, the compaction falls back to the
+built-in summary, the toast/log names the rejected value as invalid, and the
+same notice is logged once more at the first handled event so it is not
+missed. Every compaction outcome line (applied, below-minimum fallback, or
+error fallback) is tagged with the backend host and model that produced it,
+so TypeSafe and self-hosted results are never ambiguous — when a `baseUrl`
+was rejected, the tag shows the rejected raw value instead of a host.
 
 Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
 `model` is passed straight to the library; see the root README for what they
@@ -73,6 +87,58 @@ reduction, per-reason counts, state size and request count; a per-call
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
+
+## Self-hosted / local Laya
+
+Any HTTP service that implements the System One request/response contract
+below can be used instead of TypeSafe — for example a local Laya server
+speaking its first model, `typed-decisions`. To try it:
+
+```sh
+laya serve --model typed-decisions --port 8000
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
+```
+
+Set these plugin options:
+
+| Option | Value |
+| --- | --- |
+| `baseUrl` | `http://127.0.0.1:8000/v1/systemone` |
+| `model` | `typed-decisions` |
+| `apiKey` | `local` |
+| `maxStateTokens` | `650` |
+| `maxRequestTokens` | `950` |
+
+The small budgets are required, not optional: Laya's first `typed-decisions`
+model has a 1,024-token context, so the plugin's normal defaults
+(`maxStateTokens=25000`, `maxRequestTokens=30000`) would have every request
+rejected outright. Even with `650`/`950`, expect many real sessions to fall
+back with a "history too large" message — that means the transcript still
+does not fit this small a model, not that the plugin is misconfigured; a
+larger-context model is the only fix, tuning the compaction algorithm itself
+for small contexts is a separate concern. A successful compaction, a
+"history too large" fallback, and a backend-error fallback (non-2xx status)
+are all expected outcomes when experimenting with a small local model — the
+toast and log for each names which one happened, tagged with the backend
+host and model.
+
+### Request/response contract
+
+Any endpoint configured via `baseUrl` (TypeSafe or self-hosted) must satisfy:
+
+```
+POST <baseUrl>
+authorization: Bearer <apiKey>
+content-type: application/json
+
+{ "model": "<model>", "state": <JevState>, "questions": { "<name>": { "type": "noul", "instructions": "<text>" }, ... } }
+```
+
+A 2xx response with a JSON body `{ "answers": { "<name>": { "noul": <0..1> }, ... } }`
+for every question asked is treated as success. Any other status, a body
+that isn't valid JSON, or JSON missing/malforming `answers` is treated as
+failure: the hook falls back to the built-in summary and names the failure
+(status code or "malformed") in the outcome line.
 
 ## Scope and caveat
 

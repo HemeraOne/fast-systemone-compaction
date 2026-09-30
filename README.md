@@ -162,6 +162,18 @@ To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
 
+### Self-hosted / local Laya
+
+Set the `baseUrl` plugin option to point compaction requests at any
+Jev-compatible endpoint instead of TypeSafe, e.g. a local Laya server at
+`http://127.0.0.1:8000/v1/systemone` with `model=typed-decisions`,
+`apiKey=local`, and small budgets (`maxStateTokens=650`,
+`maxRequestTokens=950` — Laya's first model has a 1,024-token context).
+Leaving `baseUrl` unset keeps the existing TypeSafe behaviour. See
+[`hooks/README.md`](hooks/README.md#self-hosted--local-laya) for the start
+command, the full request/response contract, and what to expect from a small
+local model.
+
 ## Development
 
 ```sh
