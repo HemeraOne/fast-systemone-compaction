@@ -92,7 +92,18 @@ in-flight guard.
 
 Any HTTP service that implements the System One request/response contract
 below can be used instead of TypeSafe — for example a local Laya server
-speaking its first model, `typed-decisions`. To try it:
+speaking its first model, `typed-decisions`.
+
+> **Experimental — a contract test, not a practical backend yet.** Measured on
+> a CPU-only laptop: Laya's first model has a 1,024-token context (so most real
+> sessions end in "history too large"), a request takes roughly 20 s for a
+> ~650-token state and grows with both state size and question count, and
+> Claude Code caps each `$.http.fetch` at 30 s (not configurable), so slow
+> requests end in a timeout fallback. Its scores for the plugin's "keep this
+> call / result?" questions also sat near 0.5 for both obviously-droppable and
+> obviously-needed items in a small hand check, so even a completed request
+> may drop nothing. Use it to verify the wiring; expect TypeSafe, or a future
+> larger and better-suited model, for real compaction. To try it:
 
 ```sh
 pip install "laya[serve]"
