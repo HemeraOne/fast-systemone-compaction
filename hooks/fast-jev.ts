@@ -9,6 +9,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
+import { compactByRules } from '../src/rules.js';
 import {
   backendMarker,
   buildJevRequest,
@@ -48,6 +49,9 @@ export type HookFetchResponse = {
 export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetchResponse>;
 
 export type HookConfig = CompactOptions & {
+  mode: 'backend' | 'rules';
+  /** A non-empty `compactionMode` that names neither mode; compaction refuses to run. */
+  invalidMode?: string;
   apiKey?: string;
   compactAtPercent: number;
   minReductionRatio: number;
@@ -81,6 +85,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   }
   const config: HookConfig = {
     ...numbers,
+    mode: 'backend',
     compactAtPercent: optionNumber(options, 'compactAtPercent', HOOK_DEFAULTS.compactAtPercent),
     minReductionRatio: optionNumber(
       options,
@@ -89,6 +94,9 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
   };
+  const requestedMode = optionString(options, 'compactionMode')?.trim();
+  if (requestedMode === 'rules') config.mode = 'rules';
+  else if (requestedMode && requestedMode !== 'backend') config.invalidMode = requestedMode;
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
   const goal = optionString(options, 'goal');
@@ -171,12 +179,22 @@ export type SessionCompaction = {
   messages: SessionMessage[];
 };
 
-/** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
+/**
+ * Runs the library over a session transcript. Throws on an invalid mode, and in
+ * backend mode when the key is missing or Jev fails; rules mode needs neither.
+ */
 export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
 ): Promise<SessionCompaction> {
+  if (config.invalidMode) {
+    throw new Error(`invalid compactionMode: ${config.invalidMode} (use backend or rules)`);
+  }
+  if (config.mode === 'rules') {
+    const result = compactByRules(messages, config);
+    return { result, messages: toSessionMessages(messages, result.messages) };
+  }
   if (config.invalidBaseUrl) {
     throw new Error(`invalid baseUrl: ${config.invalidBaseUrl}`);
   }
@@ -206,6 +224,11 @@ export function summarize(result: CompactResult): string {
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
   }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
+}
+
+export function summarizeRules(result: CompactResult): string {
+  const { stats } = result;
+  return `${percent(reductionRatio(result))} reduction; ${stats.resultsDropped} results shortened, ${stats.callsDropped} reads removed`;
 }
 
 const UI_LOG_MAX_CHARS = 4096;
@@ -280,29 +303,36 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
   let loggedInvalidBaseUrl = false;
 
+  const rulesMode = configured.mode === 'rules' && !configured.invalidMode;
+
   on('session.compact', async ($, event, next) => {
-    if (configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
+    if (!rulesMode && configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
       loggedInvalidBaseUrl = true;
       $.ui.log(`invalid baseUrl, falling back to the built-in summary: ${configured.invalidBaseUrl}`);
     }
-    const marker = backendMarker(configured.invalidBaseUrl ?? configured.baseUrl ?? SYSTEM_ONE_URL, configured.model);
+    const marker = rulesMode
+      ? 'rules'
+      : backendMarker(configured.invalidBaseUrl ?? configured.baseUrl ?? SYSTEM_ONE_URL, configured.model);
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const config = rulesMode
+        ? configured
+        : { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
+      const summary = rulesMode ? summarizeRules(result) : summarize(result);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)}) [${marker}]`,
+          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summary}) [${marker}]`,
         );
         return next(event);
       }
       notify(
         $,
-        `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)}) [${marker}]`,
+        `kept ${messages.length}/${event.messages.length} messages, no summary (${summary}) [${marker}]`,
       );
       return { messages };
     } catch (error) {
@@ -315,7 +345,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
-    if (configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
+    if (!rulesMode && configured.invalidBaseUrl && !loggedInvalidBaseUrl) {
       loggedInvalidBaseUrl = true;
       $.ui.log(`invalid baseUrl, falling back to the built-in summary: ${configured.invalidBaseUrl}`);
     }

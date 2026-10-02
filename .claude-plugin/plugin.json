@@ -1,9 +1,14 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
+    "compactionMode": {
+      "type": "string",
+      "title": "Compaction mode",
+      "description": "backend (default): ask the configured System One endpoint which tool calls and results to keep. rules: no model and no network; shorten large old tool results and drop superseded file reads."
+    },
     "apiKey": {
       "type": "string",
       "title": "System One API key",
