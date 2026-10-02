@@ -332,6 +332,22 @@ describe('decisions', () => {
       `[fast-jev-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
     );
   });
+
+  it('does not leave half a surrogate pair at the cut', () => {
+    const messages = transcript();
+    // The emoji is two code units; a cut after 50 units would split it.
+    const text = `${'a'.repeat(49)}\u{1F600}${'b'.repeat(500)}`;
+    messages[2]!.toolResults![0]!.text = text;
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
+
+    const kept = applyDecisions(messages, decisions, calls, 50);
+    const out = kept[2]!.toolResults![0]!.text;
+    expect(out).toBe(
+      `${'a'.repeat(49)}\n[fast-jev-compaction truncated ${text.length - 49} chars of this tool result; re-run the tool if needed]`,
+    );
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
 });
 
 describe('compact', () => {

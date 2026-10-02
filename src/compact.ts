@@ -134,8 +134,13 @@ async function askBatch(
 
 function truncatedResultText(text: string, isError: boolean, headChars: number): string {
   if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+  let kept = headChars;
+  if (kept > 0) {
+    const last = text.charCodeAt(kept - 1);
+    if (last >= 0xd800 && last <= 0xdbff) kept -= 1;
+  }
+  const head = kept > 0 ? `${text.slice(0, kept)}\n` : '';
+  return `${head}[fast-jev-compaction truncated ${text.length - kept} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }
