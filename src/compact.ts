@@ -140,7 +140,7 @@ function truncatedResultText(text: string, isError: boolean, headChars: number):
     if (last >= 0xd800 && last <= 0xdbff) kept -= 1;
   }
   const head = kept > 0 ? `${text.slice(0, kept)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - kept} chars of this tool result${
+  return `${head}[fast-systemone-compaction truncated ${text.length - kept} chars of this tool result${
     isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }

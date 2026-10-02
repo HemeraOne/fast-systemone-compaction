@@ -1,7 +1,7 @@
 {
-  "name": "fast-jev-compaction",
+  "name": "fast-systemone-compaction",
   "version": "0.5.0",
-  "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model.",
+  "description": "Continuous, verbatim context compaction for LLM agents guided by a System One (Jev) model or fixed rules.",
   "type": "module",
   "license": "MIT",
   "engines": {

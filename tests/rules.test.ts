@@ -53,7 +53,7 @@ describe('rule 1: large old results', () => {
     expect(out.messages[2]).toBe(input[2]);
     expect(resultText(out.messages, 'exact')).toBe('x'.repeat(2000));
     expect(resultText(out.messages, 'over')).toBe(
-      `${'y'.repeat(300)}\n[fast-jev-compaction truncated 1701 chars of this tool result; re-run the tool if needed]`,
+      `${'y'.repeat(300)}\n[fast-systemone-compaction truncated 1701 chars of this tool result; re-run the tool if needed]`,
     );
     expect(out.stats.resultsDropped).toBe(1);
     expect(out.stats.callsDropped).toBe(0);
@@ -95,7 +95,7 @@ describe('rule 1: large old results', () => {
 
     expect(resultText(out.messages, 'inside')).toBe('x'.repeat(2050));
     expect(resultText(out.messages, 'outside')).toBe(
-      `${'y'.repeat(1950)}\n[fast-jev-compaction truncated 121 chars of this tool result; re-run the tool if needed]`,
+      `${'y'.repeat(1950)}\n[fast-systemone-compaction truncated 121 chars of this tool result; re-run the tool if needed]`,
     );
     expect(out.stats.resultsDropped).toBe(1);
   });
@@ -106,7 +106,7 @@ describe('rule 1: large old results', () => {
       truncateHeadChars: 0,
     });
     expect(resultText(out.messages, 'big')).toBe(
-      '[fast-jev-compaction truncated 5000 chars of this tool result; re-run the tool if needed]',
+      '[fast-systemone-compaction truncated 5000 chars of this tool result; re-run the tool if needed]',
     );
   });
 
