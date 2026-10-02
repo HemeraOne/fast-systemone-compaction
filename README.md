@@ -162,6 +162,19 @@ To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
 
+### Rule-based mode (no model, no network)
+
+Set the `compactionMode` plugin option to `rules` to compact without any
+backend: large old tool results (over 2,000 characters) are cut to their head
+plus a note, and file reads that a later read, edit, or write of the same file
+supersedes are removed (a partial read only when a later full read exists).
+No key or endpoint is needed and no request is made. Unset keeps the System
+One mode; an unknown value falls back to the built-in summary. The rule set
+is validated for size only (not for effect on later answers) and is the
+baseline a model-based mode must beat. The library function is
+`compactByRules(messages, options)`. Details, including the deferred
+failed-command rule, are in [`hooks/README.md`](hooks/README.md#rule-based-mode-no-model-no-network).
+
 ### Self-hosted / local Laya
 
 Set the `baseUrl` plugin option to point compaction requests at any

@@ -48,6 +48,7 @@ The plugin declares these `userConfig` values in
 
 | Option | Default |
 | --- | ---: |
+| `compactionMode` | *(unset → `backend`)* |
 | `baseUrl` | *(unset → TypeSafe)* |
 | `keepThreshold` | `0.5` |
 | `preserveRecentMessages` | `6` |
@@ -87,6 +88,53 @@ reduction, per-reason counts, state size and request count; a per-call
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
+
+## Rule-based mode (no model, no network)
+
+Set `compactionMode` to `rules` to compact with two fixed rules instead of
+asking a System One endpoint. Nothing leaves the machine, no key or endpoint
+is needed (none is looked up or reported as missing), and the same input
+always gives the same output. Unset, empty, or `backend` keeps the System One
+mode exactly as described above. Any other value (a typo such as `rulez`) is
+rejected: no request is sent anywhere, the compaction falls back to the
+built-in summary, and the toast says `invalid compactionMode: <value> (use
+backend or rules)`.
+
+The rules apply only outside the protected messages (the first and the newest
+`preserveRecentMessages`), and never rewrite user or assistant text:
+
+1. **Large old results are shortened.** A tool result longer than 2,000
+   characters (or `truncateHeadChars` + 120 when that is larger) keeps its
+   first `truncateHeadChars` characters plus the usual one-line note; the call
+   stays.
+2. **Superseded reads are removed**, call and result together. A full-file
+   `Read` goes when a later successful `Read`, `Edit`, or `Write` of the same
+   `file_path` exists. A partial `Read` (with `offset` or `limit`) goes only
+   when a later successful full `Read` of that path exists, so content no other
+   read covers is kept. A failed later call supersedes nothing, and the latest
+   touch of a path is always kept. Paths compare after turning `\` into `/`;
+   a read without a string `file_path` is kept.
+
+Deferred, not implemented: dropping a failed shell command that a later run
+repeated successfully. It never fired in the measurement, so it has not earned
+its complexity.
+
+`apiKey`, `baseUrl`, `model`, `keepThreshold`, `maxStateTokens` and
+`maxRequestTokens` are ignored in this mode; `preserveRecentMessages`,
+`truncateHeadChars`, and `minReductionRatio` apply. Below the minimum reduction
+the hook falls back to the built-in summary as usual. Outcome lines end in
+`[rules]` and report the counts:
+
+```text
+kept 40/62 messages, no summary (57% reduction; 9 results shortened, 6 reads removed) [rules]
+```
+
+**What is and is not validated.** The rule set was validated for size only: on
+a local corpus of about 370 sessions a path-only version of the rules removed
+roughly half of the characters at the median. Whether removing that content
+degrades later assistant behaviour has not been tested. Treat the rules as the
+baseline a model-based mode has to beat, not as a proven-safe replacement for
+it.
 
 ## Self-hosted / local Laya
 
