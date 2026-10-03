@@ -134,12 +134,16 @@ the hook falls back to the built-in summary as usual. Outcome lines end in
 kept 40/62 messages, no summary (57% reduction; 9 results shortened, 6 reads removed) [rules]
 ```
 
-**What is and is not validated.** The rule set was validated for size only: on
-a local corpus of about 370 sessions a path-only version of the rules removed
-roughly half of the characters at the median. Whether removing that content
-degrades later assistant behaviour has not been tested. Treat the rules as the
-baseline a model-based mode has to beat, not as a proven-safe replacement for
-it.
+**What is and is not validated.** Size: on a local corpus of about 370 sessions
+a path-only version of the rules removed roughly half of the characters at the
+median. Information loss: a local replay (`npm run replay`, see the root
+README) found that on 256 sessions, 4.0% of the values the assistant's next
+tool call used (file paths, commands, edit-target text) were gone after
+compaction, and 15.3% of edit targets (29 of 190), split about evenly between
+the two rules. Whether that degrades later assistant behaviour has not been
+tested; a lost value is an upper bound on harm, not proof of it. Treat the rules
+as the baseline a model-based mode has to beat, not as a proven-safe
+replacement for it.
 
 ## Self-hosted / local Laya
 

@@ -172,8 +172,8 @@ plus a note, and file reads that a later read, edit, or write of the same file
 supersedes are removed (a partial read only when a later full read exists).
 No key or endpoint is needed and no request is made. Unset keeps the System
 One mode; an unknown value falls back to the built-in summary. The rule set
-is validated for size only (not for effect on later answers) and is the
-baseline a model-based mode must beat. The library function is
+is validated for size and for lost information (see Safety replay below), not
+for effect on later answers, and is the baseline a model-based mode must beat. The library function is
 `compactByRules(messages, options)`. Details, including the deferred
 failed-command rule, are in [`hooks/README.md`](hooks/README.md#rule-based-mode-no-model-no-network).
 
@@ -195,7 +195,7 @@ local model.
 
 ```sh
 npm install
-npm run typecheck        # library + hook
+npm run typecheck        # library + hook + tools
 npm test
 npm run build
 npm run validate:plugin  # claude plugin validate
@@ -204,6 +204,18 @@ TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
 
 The unit tests use a fake Jev and never contact TypeSafe. The demo is the live
 network check.
+
+### Safety replay
+
+`npm run replay` checks the rule-based mode against your own past Claude Code
+sessions (default `~/.claude/projects`, or `-- --root <dir>`). At points in each
+session it compacts the history before a tool call with `compactByRules` and
+counts how often a value that call used (a file path, a command, the text an
+edit targets) occurred earlier but is gone after compaction, per rule. It runs
+offline with no model or key, prints counts, rates, and locators but never
+transcript text, and gives the same report on every run. A lost value is an
+upper bound on harm, not proof of it. The code lives in `tools/replay/` and is
+not part of the plugin or the published package.
 
 ## Animated demo (macOS)
 
