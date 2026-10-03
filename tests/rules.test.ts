@@ -53,10 +53,19 @@ describe('rule 1: large old results', () => {
     expect(out.messages[2]).toBe(input[2]);
     expect(resultText(out.messages, 'exact')).toBe('x'.repeat(2000));
     expect(resultText(out.messages, 'over')).toBe(
-      `${'y'.repeat(300)}\n[fast-systemone-compaction truncated 1701 chars of this tool result; re-run the tool if needed]`,
+      `${'y'.repeat(150)}\n[fast-systemone-compaction truncated 1701 chars of this tool result; re-run the tool if needed]\n${'y'.repeat(150)}`,
     );
     expect(out.stats.resultsDropped).toBe(1);
     expect(out.stats.callsDropped).toBe(0);
+  });
+
+  it('keeps the end of a result whose start is noise', () => {
+    const noise = 'cp: cannot create regular file\n'.repeat(100);
+    const out = compactByRules(
+      session(pair('noisy', 'Bash', {}, `${noise}Tests: 3 failed, 12 passed`)),
+      OPTIONS,
+    );
+    expect(resultText(out.messages, 'noisy')).toMatch(/Tests: 3 failed, 12 passed$/);
   });
 
   it('keeps the call when it shortens the result', () => {
@@ -95,7 +104,7 @@ describe('rule 1: large old results', () => {
 
     expect(resultText(out.messages, 'inside')).toBe('x'.repeat(2050));
     expect(resultText(out.messages, 'outside')).toBe(
-      `${'y'.repeat(1950)}\n[fast-systemone-compaction truncated 121 chars of this tool result; re-run the tool if needed]`,
+      `${'y'.repeat(975)}\n[fast-systemone-compaction truncated 121 chars of this tool result; re-run the tool if needed]\n${'y'.repeat(975)}`,
     );
     expect(out.stats.resultsDropped).toBe(1);
   });

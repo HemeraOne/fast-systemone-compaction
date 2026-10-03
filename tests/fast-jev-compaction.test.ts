@@ -295,12 +295,11 @@ describe('decisions', () => {
     ]);
     expect(kept[0]).toBe(messages[0]);
     expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-systemone-compaction truncated 1700 chars`),
+    const head150Tail150 = new RegExp(
+      `^x{150}\\n\\[fast-systemone-compaction truncated 1700 chars[^\\]]*\\]\\nx{150}$`,
     );
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-systemone-compaction truncated 1700 chars`),
-    );
+    expect(kept[2]?.toolUses[0]?.text).toMatch(head150Tail150);
+    expect(kept[3]?.toolResults?.[0]?.text).toMatch(head150Tail150);
     expect(kept[2]).not.toBe(messages[4]);
     expect(kept[3]).not.toBe(messages[5]);
     expect(kept[4]).toBe(messages[6]);
@@ -314,7 +313,7 @@ describe('decisions', () => {
     expect(shortKept[3]).toBe(shortMessages[5]);
   });
 
-  it('honours truncateHeadChars, including a zero head', () => {
+  it('splits truncateHeadChars between the start and the end, including a zero budget', () => {
     const messages = transcript();
     const calls = collectToolCalls(messages, 0);
     const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
@@ -323,7 +322,7 @@ describe('decisions', () => {
 
     const kept = applyDecisions(messages, decisions, calls, 50);
     expect(kept[2]?.toolResults?.[0]?.text).toBe(
-      `${original.slice(0, 50)}\n[fast-systemone-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
+      `${original.slice(0, 25)}\n[fast-systemone-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]\n${original.slice(total - 25)}`,
     );
     expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
 
@@ -335,8 +334,8 @@ describe('decisions', () => {
 
   it('does not leave half a surrogate pair at the cut', () => {
     const messages = transcript();
-    // The emoji is two code units; a cut after 50 units would split it.
-    const text = `${'a'.repeat(49)}\u{1F600}${'b'.repeat(500)}`;
+    // Each emoji is two code units; a 25-unit head and a 25-unit tail would split both.
+    const text = `${'a'.repeat(24)}\u{1F600}${'b'.repeat(500)}\u{1F600}${'c'.repeat(24)}`;
     messages[2]!.toolResults![0]!.text = text;
     const calls = collectToolCalls(messages, 0);
     const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
@@ -344,7 +343,7 @@ describe('decisions', () => {
     const kept = applyDecisions(messages, decisions, calls, 50);
     const out = kept[2]!.toolResults![0]!.text;
     expect(out).toBe(
-      `${'a'.repeat(49)}\n[fast-systemone-compaction truncated ${text.length - 49} chars of this tool result; re-run the tool if needed]`,
+      `${'a'.repeat(24)}\n[fast-systemone-compaction truncated ${text.length - 48} chars of this tool result; re-run the tool if needed]\n${'c'.repeat(24)}`,
     );
     expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });

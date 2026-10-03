@@ -172,13 +172,12 @@ describe('session message mapping', () => {
     expect(out).toHaveLength(messages.length);
     expect(out[0]).toBe(messages[0]);
     expect(out[1]?.handle).toBeUndefined();
-    expect(out[1]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-systemone-compaction truncated 1700 chars`),
+    const head150Tail150 = new RegExp(
+      `^x{150}\\n\\[fast-systemone-compaction truncated 1700 chars[^\\]]*\\]\\nx{150}$`,
     );
+    expect(out[1]?.toolUses[0]?.text).toMatch(head150Tail150);
     expect(out[2]?.handle).toBeUndefined();
-    expect(out[2]?.toolResults?.[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-systemone-compaction truncated 1700 chars`),
-    );
+    expect(out[2]?.toolResults?.[0]?.text).toMatch(head150Tail150);
     expect(out[2]?.toolResults?.[0]).toMatchObject({ tool_use_id: 'tool-1', isError: false });
     expect(out[3]).toBe(messages[3]);
     expect(out[4]).toBe(messages[4]);

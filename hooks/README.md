@@ -11,7 +11,8 @@ conversation as `state` (tool outputs replaced by a one-line note) and, for
 every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
 item is kept when Jev's probability reaches `keepThreshold`; a dropped result
-is truncated to its first `truncateHeadChars` characters plus a one-line note,
+is truncated to `truncateHeadChars` characters (half from its start, half from
+its end) with a one-line note between them,
 and a dropped call disappears with its result.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
@@ -108,9 +109,9 @@ The rules apply only outside the protected messages (the first and the newest
 `preserveRecentMessages`), and never rewrite user or assistant text:
 
 1. **Large old results are shortened.** A tool result longer than 2,000
-   characters (or `truncateHeadChars` + 120 when that is larger) keeps its
-   first `truncateHeadChars` characters plus the usual one-line note; the call
-   stays.
+   characters (or `truncateHeadChars` + 120 when that is larger) keeps
+   `truncateHeadChars` characters (half from its start, half from its end)
+   with the usual one-line note between them; the call stays.
 2. **Superseded reads are removed**, call and result together. A full-file
    `Read` goes when a later successful `Read`, `Edit`, or `Write` of the same
    `file_path` exists. A partial `Read` (with `offset` or `limit`) goes only
