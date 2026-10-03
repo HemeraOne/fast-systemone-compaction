@@ -368,6 +368,7 @@ const results: SessionResult[] = [
     messages: 60,
     malformedLines: 1,
     skipped: false,
+    reduction: 0.5,
     points: [
       checked(30, 'Edit', { path: 1, command: 0, editTarget: 1 }, [loss('b-session.jsonl', 30, 'Edit', 'editTarget', 'rule1', 80)]),
       checked(40, 'Bash', { path: 0, command: 1, editTarget: 0 }, []),
@@ -380,9 +381,10 @@ const results: SessionResult[] = [
     messages: 45,
     malformedLines: 0,
     skipped: false,
+    reduction: 0.4,
     points: [checked(25, 'Edit', { path: 0, command: 0, editTarget: 1 }, [loss('a-session.jsonl', 25, 'Edit', 'editTarget', 'both', 120)])],
   },
-  { session: 'c-empty.jsonl', messages: 0, malformedLines: 3, skipped: true, points: [] },
+  { session: 'c-empty.jsonl', messages: 0, malformedLines: 3, skipped: true, reduction: undefined, points: [] },
 ];
 
 describe('summarize and formatReport', () => {
@@ -453,5 +455,56 @@ describe('summarize and formatReport', () => {
     const text = formatReport(summarize([result]));
     expect(text).toContain('plain-name.jsonl');
     expect(text).not.toContain('MARKER');
+  });
+});
+
+describe('size line', () => {
+  const sized = (session: string, messages: number, reduction: number | undefined, skipped = false): SessionResult => ({
+    session,
+    messages,
+    malformedLines: 0,
+    skipped,
+    reduction,
+    points: [],
+  });
+
+  it('records the whole-session reduction of a replayed session', () => {
+    const big = session(pair('Bash', { command: 'cat build.log' }, around(5000, VALUE, 5000)), editing(VALUE));
+    expect(replaySession('s', big.messages).reduction).toBeGreaterThan(0.25);
+    const quiet = Array.from({ length: 30 }, (_, i) => chat(i % 2 ? 'assistant' : 'user', `c${i}`));
+    expect(replaySession('s', quiet).reduction).toBe(0);
+  });
+
+  it('counts only read sessions with at least 20 messages and takes the upper middle as the median', () => {
+    const odd = summarize([
+      sized('a', 60, 0.5),
+      sized('b', 45, 0.3),
+      sized('c', 30, 0.1),
+      sized('d', 10, 0.9),
+      sized('e', 0, undefined, true),
+    ]);
+    expect(odd).toMatchObject({ sizeSessions: 3, medianReduction: 0.3 });
+    expect(odd.shareAtLeast25).toBeCloseTo(2 / 3);
+
+    const even = summarize([sized('a', 60, 0.5), sized('b', 45, 0.3), sized('c', 30, 0.1), sized('f', 25, 0.45)]);
+    expect(even).toMatchObject({ sizeSessions: 4, medianReduction: 0.45, shareAtLeast25: 0.75 });
+  });
+
+  it('prints the size line between the headline counts and the per-rule table', () => {
+    const text = formatReport(summarize([sized('a', 60, 0.5), sized('b', 45, 0.3), sized('c', 30, 0.1)]));
+    expect(text).toContain('Size reduction (sessions with 20+ messages: 3)   median: 30.0%   at least 25%: 66.7%');
+    const order = ['Needed values:', 'Size reduction', 'By rule'].map((marker) => text.indexOf(marker));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
+  });
+
+  it('prints n/a when no session counts', () => {
+    const text = formatReport(summarize([sized('d', 10, 0.9), sized('e', 0, undefined, true)]));
+    expect(text).toContain('Size reduction (sessions with 20+ messages: 0)   median: n/a   at least 25%: n/a');
+  });
+
+  it('gives byte-identical output for the same input', () => {
+    const input = [sized('a', 60, 0.5), sized('b', 45, 0.3)];
+    expect(formatReport(summarize(input))).toBe(formatReport(summarize([...input].reverse())));
   });
 });

@@ -111,14 +111,18 @@ The rules apply only outside the protected messages (the first and the newest
 1. **Large old results are shortened.** A tool result longer than 2,000
    characters (or `truncateHeadChars` + 120 when that is larger) keeps
    `truncateHeadChars` characters (half from its start, half from its end)
-   with the usual one-line note between them; the call stays.
+   with the usual one-line note between them; the call stays. The result of a
+   `Read` is kept whole when a later successful `Edit`, `MultiEdit`, or `Write`
+   of the same file is in the history: its text is the likely source of the next
+   edit.
 2. **Superseded reads are removed**, call and result together. A full-file
-   `Read` goes when a later successful `Read`, `Edit`, or `Write` of the same
+   `Read` goes when a later successful full `Read` or `Write` of the same
    `file_path` exists. A partial `Read` (with `offset` or `limit`) goes only
    when a later successful full `Read` of that path exists, so content no other
-   read covers is kept. A failed later call supersedes nothing, and the latest
-   touch of a path is always kept. Paths compare after turning `\` into `/`;
-   a read without a string `file_path` is kept.
+   read covers is kept. An `Edit` or a partial `Read` supersedes nothing: it
+   changes or shows only part of the file. A failed later call supersedes
+   nothing, and the latest touch of a path is always kept. Paths compare after
+   turning `\` into `/`; a read without a string `file_path` is kept.
 
 Deferred, not implemented: dropping a failed shell command that a later run
 repeated successfully. It never fired in the measurement, so it has not earned
@@ -137,13 +141,17 @@ kept 40/62 messages, no summary (57% reduction; 9 results shortened, 6 reads rem
 **What is and is not validated.** Size: on a local corpus of about 370 sessions
 a path-only version of the rules removed roughly half of the characters at the
 median. Information loss: a local replay (`npm run replay`, see the root
-README) found that on 256 sessions, 4.0% of the values the assistant's next
-tool call used (file paths, commands, edit-target text) were gone after
-compaction, and 15.3% of edit targets (29 of 190), split about evenly between
-the two rules. Whether that degrades later assistant behaviour has not been
-tested; a lost value is an upper bound on harm, not proof of it. Treat the rules
-as the baseline a model-based mode has to beat, not as a proven-safe
-replacement for it.
+README) measures how many of the values the assistant's next tool call used
+(file paths, commands, edit-target text) are gone after compaction. On 258
+local sessions the first rule set lost 3.9% of those values and 14.8% of edit
+targets (28 of 189), split evenly between the two rules; with the current rules
+(reads of later-edited files kept whole, edits no longer removing reads) it loses
+2.1% and 7.4% of edit targets (13 of 175), at a median size reduction of 36.3%
+(46.9% before) with 82.0% of sessions reaching the 25% minimum (91.0% before).
+Sessions that no longer reach it fall back to the built-in summary. Whether
+the remaining loss degrades later assistant behaviour has not been tested; a
+lost value is an upper bound on harm, not proof of it. Treat the rules as the
+baseline a model-based mode has to beat, not as a proven-safe replacement for it.
 
 ## Self-hosted / local Laya
 

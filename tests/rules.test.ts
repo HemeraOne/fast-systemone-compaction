@@ -178,23 +178,66 @@ function removed(out: ReturnType<typeof compactByRules>, id: string): boolean {
 }
 
 describe('rule 2: superseded reads', () => {
-  it('removes a full read when a later read, edit or write of the same path exists', () => {
+  it('removes a full read when a later full read or write of the same path exists', () => {
     const input = session([
       ...read('r1', 'src/a.ts'),
       ...read('r2', 'src/a.ts'),
-      ...read('e1', 'src/b.ts'),
-      ...edit('e2', 'src/b.ts'),
       ...read('w1', 'src/c.ts'),
       ...write('w2', 'src/c.ts'),
     ]);
     const out = compactByRules(input, OPTIONS);
 
     expect(removed(out, 'r1')).toBe(true);
-    expect(removed(out, 'e1')).toBe(true);
     expect(removed(out, 'w1')).toBe(true);
-    for (const id of ['r2', 'e2', 'w2']) expect(hasCall(out.messages, id)).toBe(true);
-    expect(out.stats.callsDropped).toBe(3);
+    for (const id of ['r2', 'w2']) expect(hasCall(out.messages, id)).toBe(true);
+    expect(out.stats.callsDropped).toBe(2);
     expect(out.stats.resultsDropped).toBe(0);
+  });
+
+  it('keeps a full read that only later edits follow, however many', () => {
+    const one = compactByRules(session([...read('r', 'src/b.ts'), ...edit('e1', 'src/b.ts')]), OPTIONS);
+    const two = compactByRules(
+      session([...read('r', 'src/b.ts'), ...edit('e1', 'src/b.ts'), ...edit('e2', 'src/b.ts')]),
+      OPTIONS,
+    );
+    for (const out of [one, two]) {
+      expect(hasCall(out.messages, 'r')).toBe(true);
+      expect(out.stats.callsDropped).toBe(0);
+    }
+  });
+
+  it('removes a read that edits followed once a later full read or write arrives', () => {
+    const laterRead = compactByRules(
+      session([...read('r', 'src/b.ts'), ...edit('e', 'src/b.ts'), ...read('r2', 'src/b.ts')]),
+      OPTIONS,
+    );
+    const laterWrite = compactByRules(
+      session([...read('r', 'src/b.ts'), ...edit('e', 'src/b.ts'), ...write('w', 'src/b.ts')]),
+      OPTIONS,
+    );
+    expect(removed(laterRead, 'r')).toBe(true);
+    expect(hasCall(laterRead.messages, 'e')).toBe(true);
+    expect(removed(laterWrite, 'r')).toBe(true);
+    expect(hasCall(laterWrite.messages, 'e')).toBe(true);
+  });
+
+  it('keeps a full read when only a failed write follows', () => {
+    const failedWrite = pair('w', 'Write', { file_path: 'src/b.ts', content: 'new' }, 'denied', true);
+    const out = compactByRules(session([...read('r', 'src/b.ts'), ...failedWrite]), OPTIONS);
+    expect(hasCall(out.messages, 'r')).toBe(true);
+  });
+
+  it('lets a protected later full read or write supersede', () => {
+    const laterRead = compactByRules(
+      [message('user', 'start'), ...read('old', 'f.ts'), ...read('new', 'f.ts')],
+      OPTIONS,
+    );
+    const laterWrite = compactByRules(
+      [message('user', 'start'), ...read('old', 'f.ts'), ...write('w', 'f.ts')],
+      OPTIONS,
+    );
+    expect(removed(laterRead, 'old')).toBe(true);
+    expect(removed(laterWrite, 'old')).toBe(true);
   });
 
   it('keeps the latest read of a path and the same message objects', () => {
@@ -261,13 +304,14 @@ describe('rule 2: superseded reads', () => {
     }
   });
 
-  it('removes a full read when only a later partial read follows', () => {
+  it('keeps a full read when only a later partial read follows', () => {
     const out = compactByRules(
       session([...read('full', 'f.ts'), ...read('part', 'f.ts', 'part', { offset: 3 })]),
       OPTIONS,
     );
-    expect(removed(out, 'full')).toBe(true);
+    expect(hasCall(out.messages, 'full')).toBe(true);
     expect(hasCall(out.messages, 'part')).toBe(true);
+    expect(out.stats.callsDropped).toBe(0);
   });
 
   it('lets a failed later call supersede nothing', () => {
@@ -335,20 +379,21 @@ describe('rule 2: superseded reads', () => {
     expect(out.stats.resultsDropped).toBe(0);
   });
 
-  it('treats only Read, Edit and Write as touches, and only Read as removable', () => {
-    const input = session([
+  it('lets only a full Read or a Write supersede, and only a Read is removable', () => {
+    const others = [
       ...pair('g', 'Grep', { file_path: 'f.ts', pattern: 'a' }, 'hit'),
-      ...read('r', 'f.ts'),
       ...pair('o', 'Glob', { file_path: 'f.ts' }, 'f.ts'),
       ...edit('e', 'f.ts'),
       ...edit('e2', 'f.ts'),
-    ]);
-    const out = compactByRules(input, OPTIONS);
+    ];
+    const withoutWrite = compactByRules(session([...read('r', 'f.ts'), ...others]), OPTIONS);
+    const withWrite = compactByRules(session([...read('r', 'f.ts'), ...others, ...write('w', 'f.ts')]), OPTIONS);
 
-    expect(hasCall(out.messages, 'g')).toBe(true);
-    expect(hasCall(out.messages, 'o')).toBe(true);
-    expect(hasCall(out.messages, 'e')).toBe(true);
-    expect(removed(out, 'r')).toBe(true);
+    for (const out of [withoutWrite, withWrite]) {
+      for (const id of ['g', 'o', 'e', 'e2']) expect(hasCall(out.messages, id)).toBe(true);
+    }
+    expect(hasCall(withoutWrite.messages, 'r')).toBe(true);
+    expect(removed(withWrite, 'r')).toBe(true);
   });
 
   it('never leaves a result without its call and reports what it removed', () => {
@@ -378,6 +423,66 @@ describe('rule 2: superseded reads', () => {
     ]);
     const out = compactByRules(input, OPTIONS);
     expect(out.stats.callsDropped).toBe(0);
+  });
+});
+
+describe('rule 1: reads of files edited later', () => {
+  const big = 'z'.repeat(9000);
+
+  it('keeps the whole result of a read that a later edit of the file follows', () => {
+    const out = compactByRules(session([...read('r', 'f.ts', big), ...edit('e', 'f.ts')]), OPTIONS);
+    expect(resultText(out.messages, 'r')).toBe(big);
+    expect(out.stats.resultsDropped).toBe(0);
+    expect(out.stats.callsDropped).toBe(0);
+  });
+
+  it('keeps the whole result of a partial read that a later write follows', () => {
+    const out = compactByRules(
+      session([...read('r', 'f.ts', big, { offset: 5 }), ...write('w', 'f.ts')]),
+      OPTIONS,
+    );
+    expect(resultText(out.messages, 'r')).toBe(big);
+    expect(out.stats.resultsDropped).toBe(0);
+  });
+
+  it('counts a MultiEdit and a path spelled with backslashes', () => {
+    const multi = pair('m', 'MultiEdit', { file_path: 'src/a.ts', edits: [] }, 'ok');
+    const out = compactByRules(session([...read('r', 'src\\a.ts', big), ...multi]), OPTIONS);
+    expect(resultText(out.messages, 'r')).toBe(big);
+  });
+
+  it('still shortens a read when no edit or write of that file follows', () => {
+    const otherFile = compactByRules(session([...read('r', 'f.ts', big), ...edit('e', 'g.ts')]), OPTIONS);
+    const editBefore = compactByRules(session([...edit('e', 'f.ts'), ...read('r', 'f.ts', big)]), OPTIONS);
+    const failedEdit = compactByRules(session([...read('r', 'f.ts', big), ...edit('e', 'f.ts', true)]), OPTIONS);
+    const readOnly = compactByRules(session(read('r', 'f.ts', big)), OPTIONS);
+    for (const out of [otherFile, editBefore, failedEdit, readOnly]) {
+      expect(resultText(out.messages, 'r')).toContain('truncated 8700 chars');
+      expect(out.stats.resultsDropped).toBe(1);
+    }
+  });
+
+  it('still shortens the large result of any other tool', () => {
+    const out = compactByRules(
+      session([
+        ...pair('g', 'Grep', { file_path: 'f.ts', pattern: 'a' }, big),
+        ...pair('b', 'Bash', { command: 'cat f.ts' }, big),
+        ...edit('e', 'f.ts'),
+      ]),
+      OPTIONS,
+    );
+    expect(resultText(out.messages, 'g')).toContain('truncated 8700 chars');
+    expect(resultText(out.messages, 'b')).toContain('truncated 8700 chars');
+    expect(out.stats.resultsDropped).toBe(2);
+  });
+
+  it('removes a read that edits followed once a later full read arrives', () => {
+    const out = compactByRules(
+      session([...read('r', 'f.ts', big), ...edit('e', 'f.ts'), ...read('r2', 'f.ts', 'new')]),
+      OPTIONS,
+    );
+    expect(removed(out, 'r')).toBe(true);
+    expect(out.stats.resultsDropped).toBe(0);
   });
 });
 

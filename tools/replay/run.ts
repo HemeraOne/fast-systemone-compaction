@@ -32,10 +32,12 @@ function replayFile(path: string): SessionResult {
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    return { session, messages: 0, malformedLines: 0, skipped: true, points: [] };
+    return { session, messages: 0, malformedLines: 0, skipped: true, reduction: undefined, points: [] };
   }
   const { messages, malformedLines } = parseTranscript(text);
-  if (messages.length === 0) return { session, messages: 0, malformedLines, skipped: true, points: [] };
+  if (messages.length === 0) {
+    return { session, messages: 0, malformedLines, skipped: true, reduction: undefined, points: [] };
+  }
   return { ...replaySession(session, messages), malformedLines };
 }
 

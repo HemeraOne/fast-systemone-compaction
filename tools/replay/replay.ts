@@ -42,6 +42,8 @@ export interface SessionResult {
   messages: number;
   malformedLines: number;
   skipped: boolean;
+  /** Reduction of the whole session by `compactByRules` with default options; none when skipped. */
+  reduction: number | undefined;
   points: PointResult[];
 }
 
@@ -204,5 +206,12 @@ export function replaySession(session: string, messages: readonly Message[]): Se
     ...tooShort.map((point) => excluded(point, 'history-too-short')),
     ...eligible.map((point) => checkPoint(session, messages, point)),
   ];
-  return { session, messages: messages.length, malformedLines: 0, skipped: false, points };
+  return {
+    session,
+    messages: messages.length,
+    malformedLines: 0,
+    skipped: false,
+    reduction: reductionRatio(compactByRules(messages)),
+    points,
+  };
 }

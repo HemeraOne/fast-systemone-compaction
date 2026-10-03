@@ -13,8 +13,15 @@ export interface Summary {
   byRule: Record<Rule, number>;
   neededByKind: Record<ValueKind, number>;
   lostByKind: Record<ValueKind, number>;
+  /** Read sessions with at least this many messages count in the size figures. */
+  sizeSessions: number;
+  medianReduction: number | undefined;
+  shareAtLeast25: number | undefined;
   losses: Loss[];
 }
+
+const MIN_SIZE_MESSAGES = 20;
+const SIZE_BAR = 0.25;
 
 const RULE_LABELS: Record<Rule, string> = { rule1: 'rule 1', rule2: 'rule 2', both: 'both' };
 
@@ -42,8 +49,12 @@ export function summarize(results: readonly SessionResult[]): Summary {
     byRule: { rule1: 0, rule2: 0, both: 0 },
     neededByKind: { path: 0, command: 0, editTarget: 0 },
     lostByKind: { path: 0, command: 0, editTarget: 0 },
+    sizeSessions: 0,
+    medianReduction: undefined,
+    shareAtLeast25: undefined,
     losses: [],
   };
+  const reductions: number[] = [];
   for (const result of results) {
     summary.malformedLines += result.malformedLines;
     if (result.skipped) {
@@ -51,6 +62,9 @@ export function summarize(results: readonly SessionResult[]): Summary {
       continue;
     }
     summary.sessionsRead++;
+    if (result.reduction !== undefined && result.messages >= MIN_SIZE_MESSAGES) {
+      reductions.push(result.reduction);
+    }
     for (const point of result.points) {
       if (point.status === 'excluded') {
         if (point.excludedReason === 'history-too-short') summary.excludedTooShort++;
@@ -72,7 +86,17 @@ export function summarize(results: readonly SessionResult[]): Summary {
     }
   }
   summary.losses.sort(byLocator);
+  if (reductions.length > 0) {
+    reductions.sort((a, b) => a - b);
+    summary.sizeSessions = reductions.length;
+    summary.medianReduction = reductions[Math.floor(reductions.length / 2)];
+    summary.shareAtLeast25 = reductions.filter((r) => r >= SIZE_BAR).length / reductions.length;
+  }
   return summary;
+}
+
+function percent(value: number | undefined): string {
+  return value === undefined ? 'n/a' : `${(100 * value).toFixed(1)}%`;
 }
 
 function rate(lost: number, needed: number): string {
@@ -92,6 +116,7 @@ export function formatReport(summary: Summary): string {
     `Sessions read: ${summary.sessionsRead}   skipped: ${summary.sessionsSkipped}   malformed lines: ${summary.malformedLines}`,
     `Replay points checked: ${summary.pointsChecked}   excluded: ${excluded} (history too short: ${summary.excludedTooShort}, below minimum reduction: ${summary.excludedLowReduction})`,
     `Needed values: ${summary.neededValues}   lost: ${summary.lostValues}   loss rate: ${rate(summary.lostValues, summary.neededValues)}   points with a loss: ${summary.pointsWithLoss}`,
+    `Size reduction (sessions with ${MIN_SIZE_MESSAGES}+ messages: ${summary.sizeSessions})   median: ${percent(summary.medianReduction)}   at least 25%: ${percent(summary.shareAtLeast25)}`,
     '',
     `${'By rule'.padEnd(10)}${'lost'.padStart(7)}${'rate'.padStart(8)}`,
     rule('rule 1', summary.byRule.rule1),

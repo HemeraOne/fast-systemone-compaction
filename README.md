@@ -167,14 +167,16 @@ just the repo's `.claude-plugin/marketplace.json`.
 ### Rule-based mode (no model, no network)
 
 Set the `compactionMode` plugin option to `rules` to compact without any
-backend: large old tool results (over 2,000 characters) are cut to their head
-plus a note, and file reads that a later read, edit, or write of the same file
-supersedes are removed (a partial read only when a later full read exists).
+backend: large old tool results (over 2,000 characters) are cut to a head and a
+tail around a note (except reads of a file that a later edit or write follows,
+which are kept whole), and file reads that a later full read or write of the
+same file supersedes are removed (a partial read only when a later full read
+exists).
 No key or endpoint is needed and no request is made. Unset keeps the System
 One mode; an unknown value falls back to the built-in summary. The rule set
 is validated for size and for lost information (see Safety replay below), not
-for effect on later answers, and is the baseline a model-based mode must beat. The library function is
-`compactByRules(messages, options)`. Details, including the deferred
+for effect on later answers, and is the baseline a model-based mode must beat.
+The library function is `compactByRules(messages, options)`. Details, including the deferred
 failed-command rule, are in [`hooks/README.md`](hooks/README.md#rule-based-mode-no-model-no-network).
 
 ### Self-hosted / local Laya
