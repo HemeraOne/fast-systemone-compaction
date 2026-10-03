@@ -61,7 +61,11 @@ The plugin declares these `userConfig` values in
 
 The System One key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
-development setup.
+development setup. The key is resolved in this order: the `apiKey` option, the
+`TYPESAFE_API_KEY` environment variable, then `env.TYPESAFE_API_KEY` in
+`settings.json`. If the hook does not see the shell environment (for example
+when Claude Code is started from a launcher that does not inherit it), put the
+key under `env` in `settings.json` instead.
 
 `baseUrl` points compaction requests at any Jev-compatible System One
 endpoint instead of TypeSafe — see "Self-hosted / local Laya" below. Leave it
