@@ -1,6 +1,6 @@
 {
   "name": "fast-systemone-compaction",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Verbatim context compaction for Claude Code sessions, guided by a System One model or fixed rules.",
   "license": "MIT",
   "userConfig": {

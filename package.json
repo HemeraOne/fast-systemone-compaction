@@ -1,6 +1,6 @@
 {
   "name": "fast-systemone-compaction",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Continuous, verbatim context compaction for LLM agents guided by a System One (Jev) model or fixed rules.",
   "type": "module",
   "license": "MIT",
