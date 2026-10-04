@@ -210,7 +210,9 @@ network check.
 ### Safety replay
 
 `npm run replay` checks the rule-based mode against your own past Claude Code
-sessions (default `~/.claude/projects`, or `-- --root <dir>`). At points in each
+sessions (default `~/.claude/projects`, or `-- --root <dir>`; `-- --before
+<date>` keeps only session files last modified before that date, 00:00 UTC, to
+approximate an earlier corpus). At points in each
 session it compacts the history before a tool call with `compactByRules` and
 counts how often a value that call used (a file path, a command, the text an
 edit targets) occurred earlier but is gone after compaction, per rule. It runs
