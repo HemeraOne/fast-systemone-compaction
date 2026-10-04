@@ -24,6 +24,7 @@
     "test": "vitest run",
     "demo": "tsx examples/demo.ts",
     "replay": "tsx tools/replay/run.ts",
+    "behaviour": "tsx tools/behaviour/run.ts",
     "typecheck:hooks": "tsc -p tsconfig.hooks.json",
     "typecheck:tools": "tsc -p tsconfig.tools.json",
     "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
