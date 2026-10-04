@@ -8,6 +8,8 @@ import { parseTranscript } from '../replay/transcript.js';
 /** A checked replay point with at least one loss, with the session it came from. */
 export interface LostPoint {
   session: string;
+  /** Full path of the session file; only the stub reads it. */
+  path: string;
   messageIndex: number;
   toolUseId: string;
   tool: string;
@@ -48,6 +50,7 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
       if (point.status !== 'checked' || point.losses.length === 0) continue;
       points.push({
         session,
+        path,
         messageIndex: point.messageIndex,
         toolUseId: point.toolUseId,
         tool: point.tool,

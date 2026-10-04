@@ -7,18 +7,24 @@ import {
   buildLookup,
   compactedHistory,
   controlHistory,
+  flattenHistory,
   matchesRecorded,
   pointContext,
-  toApiMessages,
+  renderTranscript,
+  SUMMARY_REQUEST,
+  summaryHistory,
+  summaryPrompt,
 } from '../tools/behaviour/history.js';
-import type { ApiBlock } from '../tools/behaviour/history.js';
+import { buildArgs, parseStream, quoteArg } from '../tools/behaviour/model.js';
+import type { ChildRequest, ChildResult, ChildRunner, Scratch, StreamLine } from '../tools/behaviour/model.js';
 import { formatReport, summarize } from '../tools/behaviour/report.js';
 import type { PointRecord, RunInfo } from '../tools/behaviour/report.js';
 import { run } from '../tools/behaviour/run.js';
 import { lostPoints, sample } from '../tools/behaviour/select.js';
 import type { LostPoint } from '../tools/behaviour/select.js';
-import { runPoint } from '../tools/behaviour/session.js';
+import { runPoint, runText } from '../tools/behaviour/session.js';
 import type { Outcome, SessionDeps } from '../tools/behaviour/session.js';
+import { createStub, MAX_LOOKUPS, NOT_AVAILABLE, STOP, STUB_TOOLS } from '../tools/behaviour/stub.js';
 
 // --- synthetic sessions (same shapes as tests/replay.test.ts) --------------------
 
@@ -95,7 +101,7 @@ function toJsonl(messages: readonly Message[]): string {
     .join('\n');
 }
 
-// --- temp corpus and scripted fake fetch -----------------------------------------
+// --- temp corpus, scripted fake child runner, fake scratch ------------------------
 
 const dirs: string[] = [];
 
@@ -114,39 +120,73 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const toolUse = (name: string, input: Record<string, unknown>, id = `call${++nextId}`): ApiBlock => ({
-  type: 'tool_use',
-  id,
-  name,
-  input,
-});
-
-const okBody = (content: ApiBlock[], input = 100, output = 10): Response =>
-  new Response(JSON.stringify({ content, stop_reason: 'tool_use', usage: { input_tokens: input, output_tokens: output } }));
-
-interface Recorded {
-  messages: { role: string; content: unknown }[];
-  tools?: unknown;
+function pointOf(messages: Message[]): LostPoint {
+  const { points } = lostPoints(corpus({ 'p/s.jsonl': messages }));
+  if (points.length !== 1) throw new Error(`expected one lost point, got ${points.length}`);
+  return points[0]!;
 }
 
-/** A fetch that answers from a function of the parsed request and remembers every request. */
-function fakeFetch(answer: (request: Recorded, count: number) => Response) {
-  const requests: Recorded[] = [];
-  const impl = vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
-    const request = JSON.parse(String(init?.body)) as Recorded;
+const textOf = (value: unknown): string => JSON.stringify(value);
+
+const event = (value: unknown, at: number): StreamLine => ({ text: JSON.stringify(value), at });
+
+interface StreamOptions {
+  calls?: { tool: string; input: Record<string, unknown> }[];
+  /** Tokens as `usage`; `null` leaves usage out. */
+  usage?: { input_tokens: number; output_tokens: number } | null;
+  init?: unknown;
+  result?: boolean;
+  isError?: boolean;
+  text?: string;
+}
+
+/** A child's event stream: init, one assistant event per call (one second apart), the result. */
+function stream(options: StreamOptions = {}): StreamLine[] {
+  const lines: StreamLine[] = [];
+  lines.push(event({ type: 'system', subtype: 'init', ...(options.init === undefined ? { mcp_servers: [{ name: 'stub', status: 'connected' }], tools: ['mcp__stub__Read', 'mcp__stub__Edit'] } : options.init as object) }, 1500));
+  (options.calls ?? []).forEach((call, i) => {
+    lines.push(
+      event(
+        { type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${++nextId}`, name: `mcp__stub__${call.tool}`, input: call.input }] } },
+        2000 + i * 1000,
+      ),
+    );
+  });
+  if (options.result !== false) {
+    lines.push(
+      event(
+        {
+          type: 'result',
+          is_error: options.isError === true,
+          result: options.text ?? 'done',
+          ...(options.usage === null ? {} : { usage: options.usage ?? { input_tokens: 100, output_tokens: 10 } }),
+        },
+        9000,
+      ),
+    );
+  }
+  return lines;
+}
+
+const ok = (lines: StreamLine[], code: number | null = 0): ChildResult => ({ ok: true, lines, code });
+
+/** A runner that answers from a function of the request and remembers every request. */
+function fakeRunner(answer: (request: ChildRequest, count: number) => ChildResult) {
+  const requests: ChildRequest[] = [];
+  const impl = vi.fn(async (request: ChildRequest) => {
     requests.push(request);
     return answer(request, requests.length);
   });
-  return { fetch: impl as unknown as typeof fetch, requests, impl };
+  return { runner: impl as ChildRunner, requests, impl };
 }
 
-/** A fetch that plays the given replies in order. */
-function scripted(replies: (ApiBlock[] | Response)[]) {
-  return fakeFetch((_request, count) => {
-    const reply = replies[count - 1];
-    if (reply === undefined) return new Response('no more replies', { status: 500 });
-    return reply instanceof Response ? reply : okBody(reply);
-  });
+/** A runner that plays the given results in order. */
+function scripted(results: ChildResult[]) {
+  return fakeRunner((_request, count) => results[count - 1] ?? { ok: false, reason: 'script ended' });
+}
+
+function fakeScratch(): Scratch & { cleanup: ReturnType<typeof vi.fn> } {
+  return { cwd: '/scratch/work', mcpConfigFor: () => '/scratch/mcp.json', cleanup: vi.fn() };
 }
 
 function clock(): () => number {
@@ -154,18 +194,12 @@ function clock(): () => number {
   return () => (t += 1000);
 }
 
-function deps(fetchImpl: typeof fetch): SessionDeps {
-  return { fetch: fetchImpl, apiKey: 'sk-ant-test-key', model: 'test-model', now: clock() };
+function deps(runner: ChildRunner): SessionDeps {
+  return { runner, scratch: fakeScratch(), model: 'test-model', now: clock() };
 }
 
-function pointOf(messages: Message[]): LostPoint {
-  const root = corpus({ 'p/s.jsonl': messages });
-  const { points } = lostPoints(root);
-  if (points.length !== 1) throw new Error(`expected one lost point, got ${points.length}`);
-  return points[0]!;
-}
-
-const textOf = (value: unknown): string => JSON.stringify(value);
+const call = (tool: string, input: Record<string, unknown>) => ({ tool, input });
+const edit = (old: string, file = 'src/billing.ts') => call('Edit', { file_path: file, old_string: old, new_string: 'n' });
 
 // --- selection and histories ----------------------------------------------------
 
@@ -175,6 +209,7 @@ describe('selection', () => {
     const { points, sessions } = lostPoints(root);
     expect(sessions).toBe(2);
     expect(points.map((p) => p.session)).toEqual(['a.jsonl', 'b.jsonl']);
+    expect(points[0]!.path).toBe(join(root, 'p2', 'a.jsonl'));
     expect(lostPoints(root).points.map((p) => p.messageIndex)).toEqual(points.map((p) => p.messageIndex));
   });
 
@@ -196,29 +231,38 @@ describe('histories', () => {
     const point = pointOf(reachableSession());
     expect(textOf(controlHistory(point.messages, point.messageIndex))).toContain(VALUE);
     expect(textOf(compactedHistory(point.messages, point.messageIndex))).not.toContain(VALUE);
+    expect(flattenHistory(controlHistory(point.messages, point.messageIndex))).toContain(VALUE);
+    expect(flattenHistory(compactedHistory(point.messages, point.messageIndex))).not.toContain(VALUE);
   });
 
-  it('maps messages to API messages, keeps tool pairs, drops empty text, merges same-role runs', () => {
+  it('renders a labelled transcript with roles, tool calls, named results and error marks', () => {
     const messages: Message[] = [
       chat('user', 'go'),
-      { role: 'assistant', text: '', toolUses: [{ tool_use_id: 't1', tool: 'Read', input: { file_path: 'a.ts' } }] },
-      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 't1', text: 'boom', isError: true }] },
-      chat('assistant', ''),
-      chat('user', 'and then?'),
+      ...pair('Read', { file_path: 'a.ts' }, 'boom', true),
       chat('assistant', 'done'),
+      chat('assistant', ''),
     ];
-    expect(toApiMessages(messages)).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'go' }] },
-      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a.ts' } }] },
-      {
-        role: 'user',
-        content: [
-          { type: 'tool_result', tool_use_id: 't1', content: 'boom', is_error: true },
-          { type: 'text', text: 'and then?' },
-        ],
-      },
-      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
-    ]);
+    const text = renderTranscript(messages);
+    expect(text).toBe(
+      [
+        '=== user ===\ngo',
+        '--- assistant tool call: Read ---\n{"file_path":"a.ts"}',
+        '--- tool result: Read (error) ---\nboom',
+        '=== assistant ===\ndone',
+      ].join('\n\n'),
+    );
+    const prompt = flattenHistory(messages);
+    expect(prompt.startsWith('Below is the conversation so far')).toBe(true);
+    expect(prompt).toContain(text);
+    expect(prompt.endsWith('Do not describe what you would do.')).toBe(true);
+  });
+
+  it('builds the summary request and the summary arm prompt', () => {
+    const messages = [chat('user', 'go'), chat('assistant', 'ok')];
+    expect(summaryPrompt(messages)).toBe(`${renderTranscript(messages)}\n\n${SUMMARY_REQUEST}`);
+    const arm = summaryHistory('the gist');
+    expect(arm).toContain('=== summary of the conversation so far ===\nthe gist');
+    expect(arm).toContain('Continue as the assistant');
   });
 });
 
@@ -246,10 +290,10 @@ describe('lookups', () => {
   });
 
   it('refuses a Read after a later successful Edit of that file, not after a failed one', () => {
-    const edit = (isError: boolean): Message[] =>
+    const changed = (isError: boolean): Message[] =>
       pair('Edit', { file_path: 'src/a.ts', old_string: 'o', new_string: 'n' }, 'r', isError);
-    expect(buildLookup([...read, ...edit(false)]).serve({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBeUndefined();
-    expect(buildLookup([...read, ...edit(true)]).serve({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBe('BODY-A');
+    expect(buildLookup([...read, ...changed(false)]).serve({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBeUndefined();
+    expect(buildLookup([...read, ...changed(true)]).serve({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBe('BODY-A');
   });
 
   it('reports a point as reachable only when a lost value sits in a result the stubs can serve', () => {
@@ -277,73 +321,209 @@ describe('matchesRecorded', () => {
 
   it('matches an edit target that occurs in a recorded text holding the recorded target', () => {
     const recorded = step('Edit', { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'y' });
-    const edit = (old: unknown) => ({ tool: 'Edit', input: { file_path: 'src/billing.ts', old_string: old } });
-    expect(matchesRecorded(edit(VALUE), recorded, prefix)).toBe(true);
-    expect(matchesRecorded(edit('computeInvoiceTotal(lineItems'), recorded, prefix)).toBe(true);
-    expect(matchesRecorded(edit('somewhere else entirely'), recorded, prefix)).toBe(false);
-    expect(matchesRecorded(edit(''), recorded, prefix)).toBe(false);
+    const proposed = (old: unknown) => ({ tool: 'Edit', input: { file_path: 'src/billing.ts', old_string: old } });
+    expect(matchesRecorded(proposed(VALUE), recorded, prefix)).toBe(true);
+    expect(matchesRecorded(proposed('computeInvoiceTotal(lineItems'), recorded, prefix)).toBe(true);
+    expect(matchesRecorded(proposed('somewhere else entirely'), recorded, prefix)).toBe(false);
+    expect(matchesRecorded(proposed(''), recorded, prefix)).toBe(false);
     expect(matchesRecorded({ tool: 'Edit', input: { file_path: 'src/billing.ts' } }, recorded, prefix)).toBe(false);
     expect(matchesRecorded({ tool: 'Edit', input: { file_path: 'src/x.ts', old_string: VALUE } }, recorded, prefix)).toBe(false);
   });
 });
 
-// --- classification --------------------------------------------------------------
+// --- the child: arguments, stream, quoting ----------------------------------------
 
-describe('runPoint', () => {
-  const edit = (old: string, file = 'src/billing.ts') => toolUse('Edit', { file_path: file, old_string: old, new_string: 'n' });
-
-  it('same: the matching call at once, no lookups', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const model = scripted([[edit(VALUE)]]);
-    const outcome = await runPoint(context, [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], deps(model.fetch));
-    expect(outcome).toEqual({ class: 'same', lookups: 0, seconds: 1, tokens: 110 });
+describe('buildArgs', () => {
+  it('isolates the child, keeps the subscription login usable, and names no key', () => {
+    const args = buildArgs({ model: 'sonnet', mcpConfig: '/scratch/mcp.json' });
+    for (const flag of ['-p', '--safe-mode', '--no-session-persistence', '--strict-mcp-config', '--verbose']) {
+      expect(args).toContain(flag);
+    }
+    expect(args).not.toContain('--bare');
+    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'sonnet']);
+    expect(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 2)).toEqual(['--tools', '']);
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('/scratch/mcp.json');
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe(
+      'mcp__stub__Read,mcp__stub__Grep,mcp__stub__Glob,mcp__stub__Edit,mcp__stub__Bash',
+    );
+    expect(textOf(args).toLowerCase()).not.toContain('api');
   });
 
-  it('recovered: a Read lookup is answered from the record, then the matching call', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const model = scripted([[toolUse('Read', { file_path: 'src\\billing.ts' }, 'r1')], [edit(VALUE)]]);
-    const outcome = await runPoint(context, [{ role: 'user', content: [{ type: 'text', text: 'go' }] }], deps(model.fetch));
-    expect(outcome).toEqual({ class: 'recovered', lookups: 1, seconds: 1, tokens: 220 });
-    const answer = model.requests[1]!.messages.at(-1)!;
-    expect(answer.role).toBe('user');
-    expect(textOf(answer.content)).toContain(VALUE);
+  it('leaves the stub out for the summary call', () => {
+    const args = buildArgs({ model: 'sonnet' });
+    expect(args).not.toContain('--mcp-config');
+    expect(args).not.toContain('--allowedTools');
+    expect(args).toContain('--strict-mcp-config');
+  });
+
+  it('quotes only what the Windows shell would split', () => {
+    expect(quoteArg('plain')).toBe('plain');
+    expect(quoteArg('')).toBe('""');
+    expect(quoteArg('two words')).toBe('"two words"');
+    expect(quoteArg('say "hi"')).toBe('"say \\"hi\\""');
+  });
+});
+
+describe('parseStream', () => {
+  it('reads calls with their times, strips the stub prefix, and sums every reported token', () => {
+    const lines = stream({ calls: [call('Read', { file_path: 'a.ts' }), edit(VALUE)] });
+    lines[lines.length - 1] = event(
+      {
+        type: 'result',
+        is_error: false,
+        result: 'done',
+        usage: { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 7 },
+      },
+      9000,
+    );
+    const parsed = parseStream(lines);
+    expect(parsed.calls.map((c) => [c.tool, c.at])).toEqual([['Read', 2000], ['Edit', 3000]]);
+    expect(parsed).toMatchObject({ stubConnected: true, tokens: 122, sawResult: true, isError: false, resultText: 'done' });
+  });
+
+  it('skips lines that are not JSON, counts a repeated call once, and reads a missing usage as unknown', () => {
+    const one = stream({ calls: [edit(VALUE)], usage: null });
+    const parsed = parseStream([{ text: 'not json', at: 1 }, ...one, one[1]!]);
+    expect(parsed.calls).toHaveLength(1);
+    expect(parsed.tokens).toBeUndefined();
+  });
+
+  it('reports stub tools that were not offered, and a compaction inside the child', () => {
+    expect(parseStream(stream({ init: { mcp_servers: [{ name: 'stub', status: 'connected' }], tools: ['Bash'] } })).toolsOffered).toBe(false);
+    expect(parseStream(stream({ init: { tools: ['mcp__stub__Read'] } })).toolsOffered).toBe(true);
+    expect(parseStream(stream({ init: {} })).toolsOffered).toBeUndefined();
+    const lines = [...stream({ calls: [edit(VALUE)] }), event({ type: 'system', subtype: 'compact_boundary' }, 5000)];
+    expect(parseStream(lines).compacted).toBe(true);
+    expect(parseStream(stream({ calls: [edit(VALUE)] })).compacted).toBe(false);
+  });
+
+  it('reports a stub that is not connected, and leaves it unknown when no servers are listed', () => {
+    expect(parseStream(stream({ init: { mcp_servers: [{ name: 'stub', status: 'failed' }] } })).stubConnected).toBe(false);
+    expect(parseStream(stream({ init: { mcp_servers: [] } })).stubConnected).toBe(false);
+    expect(parseStream(stream({ init: {} })).stubConnected).toBeUndefined();
+  });
+});
+
+// --- the stub -------------------------------------------------------------------------
+
+describe('stub', () => {
+  const make = () => {
+    const point = pointOf(reachableSession());
+    return createStub(point);
+  };
+  const tool = (id: number, name: string, args: Record<string, unknown>) => ({
+    jsonrpc: '2.0',
+    id,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  });
+  const replyText = (response: ReturnType<ReturnType<typeof make>['handle']>) =>
+    ((response?.result as { content: { text: string }[] }).content[0]!.text);
+
+  it('speaks the handshake: initialize, ping, tools/list, and silence for notifications', () => {
+    const stub = make();
+    expect(stub.handle({ id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } })?.result).toMatchObject({
+      protocolVersion: '2025-03-26',
+      serverInfo: { name: 'stub' },
+    });
+    expect(stub.handle({ method: 'notifications/initialized' })).toBeUndefined();
+    expect(stub.handle({ id: 2, method: 'ping' })?.result).toEqual({});
+    const listed = (stub.handle({ id: 3, method: 'tools/list' })?.result as { tools: { name: string }[] }).tools;
+    expect(listed.map((t) => t.name)).toEqual(['Read', 'Grep', 'Glob', 'Edit', 'Bash']);
+    expect(listed).toEqual(STUB_TOOLS);
+    expect(stub.handle({ id: 4, method: 'resources/list' })?.error?.code).toBe(-32601);
+  });
+
+  it('answers a lookup from the recorded history, and says not available for anything else', () => {
+    const stub = make();
+    expect(replyText(stub.handle(tool(1, 'Read', { file_path: 'src\\billing.ts' })))).toContain(VALUE);
+    const missing = stub.handle(tool(2, 'Read', { file_path: 'src/none.ts' }));
+    expect(replyText(missing)).toBe(NOT_AVAILABLE);
+    expect((missing?.result as { isError: boolean }).isError).toBe(true);
+    expect(replyText(stub.handle(tool(3, 'Grep', { pattern: 'nothing recorded' })))).toBe(NOT_AVAILABLE);
+  });
+
+  it('ends the conversation at the terminal action and after the lookup limit', () => {
+    const stub = make();
+    expect(replyText(stub.handle(tool(1, 'Edit', { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'n' })))).toBe(STOP);
+    for (let i = 0; i < MAX_LOOKUPS; i++) {
+      expect(replyText(stub.handle(tool(10 + i, 'Grep', { pattern: `p${i}` })))).toBe(NOT_AVAILABLE);
+    }
+    expect(replyText(stub.handle(tool(20, 'Grep', { pattern: 'one too many' })))).toBe(STOP);
+  });
+});
+
+// --- classification ----------------------------------------------------------------------
+
+describe('runPoint', () => {
+  const setup = (messages: Message[]) => {
+    const point = pointOf(messages);
+    return { point, context: pointContext(point) };
+  };
+
+  it('same: the matching call at once, no lookups, timed to the call', async () => {
+    const { point, context } = setup(reachableSession());
+    const model = scripted([ok(stream({ calls: [edit(VALUE)] }))]);
+    const outcome = await runPoint(point, context, 'the prompt', deps(model.runner));
+    expect(outcome).toEqual({ class: 'same', lookups: 0, seconds: 1, tokens: 110 });
+    expect(model.requests[0]).toMatchObject({ prompt: 'the prompt', cwd: '/scratch/work' });
+    expect(model.requests[0]!.args).toContain('/scratch/mcp.json');
+  });
+
+  it('recovered: a Read lookup, then the matching call', async () => {
+    const { point, context } = setup(reachableSession());
+    const model = scripted([ok(stream({ calls: [call('Read', { file_path: 'src\\billing.ts' }), edit(VALUE)] }))]);
+    expect(await runPoint(point, context, 'p', deps(model.runner))).toEqual({ class: 'recovered', lookups: 1, seconds: 2, tokens: 110 });
   });
 
   it('wrong: a call that is not the recorded step on a reachable point', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const outcome = await runPoint(context, [], deps(scripted([[edit('something unrelated')]]).fetch));
+    const { point, context } = setup(reachableSession());
+    const outcome = await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [edit('something unrelated')] }))]).runner));
     expect(outcome.class).toBe('wrong');
   });
 
   it('unreachable: a non-matching call when no stub could return the lost value', async () => {
-    const context = pointContext(pointOf(unreachableSession()));
-    const outcome = await runPoint(context, [], deps(scripted([[edit('something unrelated', 'src/elsewhere.ts')]]).fetch));
-    expect(outcome.class).toBe('unreachable');
+    const { point, context } = setup(unreachableSession());
+    const stream1 = stream({ calls: [edit('something unrelated', 'src/elsewhere.ts')] });
+    expect((await runPoint(point, context, 'p', deps(scripted([ok(stream1)]).runner))).class).toBe('unreachable');
   });
 
-  it('gave-up: no tool call', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const outcome = await runPoint(context, [], deps(scripted([[{ type: 'text', text: 'I will stop here' }]]).fetch));
-    expect(outcome.class).toBe('gave-up');
+  it('gave-up: no tool call, and the sixth lookup', async () => {
+    const { point, context } = setup(reachableSession());
+    expect((await runPoint(point, context, 'p', deps(scripted([ok(stream())]).runner))).class).toBe('gave-up');
+    const lookups = Array.from({ length: 6 }, (_, i) => call('Grep', { pattern: `p${i}` }));
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: lookups }))]).runner))).toMatchObject({
+      class: 'gave-up',
+      lookups: 6,
+    });
   });
 
-  it('gave-up: the sixth lookup', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const lookups = Array.from({ length: 6 }, (_, i) => [toolUse('Grep', { pattern: `p${i}` })]);
-    const model = scripted(lookups);
-    const outcome = await runPoint(context, [], deps(model.fetch));
-    expect(outcome).toMatchObject({ class: 'gave-up', lookups: 6 });
-    expect(model.requests).toHaveLength(6);
+  it('failed, with a fixed reason: cannot start, timeout, exit without result, stub not connected, error result', async () => {
+    const { point, context } = setup(reachableSession());
+    const reasonOf = async (result: ChildResult) => runPoint(point, context, 'p', deps(scripted([result]).runner));
+    expect(await reasonOf({ ok: false, reason: 'cannot start claude' })).toMatchObject({
+      class: 'failed',
+      reason: 'cannot start claude',
+      tokens: 0,
+      unmetered: true,
+    });
+    expect(await reasonOf({ ok: false, reason: 'timeout' })).toMatchObject({ class: 'failed', reason: 'timeout' });
+    expect(await reasonOf(ok(stream({ result: false }), 1))).toMatchObject({ class: 'failed', reason: 'exit 1' });
+    expect(await reasonOf(ok(stream({ result: false }), 0))).toMatchObject({ class: 'failed', reason: 'no result' });
+    expect(await reasonOf(ok(stream({ init: { mcp_servers: [] } })))).toMatchObject({ class: 'failed', reason: 'stub not connected' });
+    expect(await reasonOf(ok(stream({ isError: true })))).toMatchObject({ class: 'failed', reason: 'error result' });
+    expect(await reasonOf(ok(stream({ init: { mcp_servers: [{ name: 'stub', status: 'connected' }], tools: ['Bash'] } })))).toMatchObject({
+      class: 'failed',
+      reason: 'stub tools not offered',
+    });
+    const compacted = [...stream({ calls: [edit(VALUE)] }), event({ type: 'system', subtype: 'compact_boundary' }, 5000)];
+    expect(await reasonOf(ok(compacted))).toMatchObject({ class: 'failed', reason: 'auto-compacted' });
   });
 
-  it('failed: a model call that does not succeed', async () => {
-    const context = pointContext(pointOf(reachableSession()));
-    const outcome = await runPoint(context, [], deps(scripted([new Response('no', { status: 500 })]).fetch));
-    expect(outcome).toMatchObject({ class: 'failed', tokens: 0 });
-    const thrown = vi.fn(async () => {
-      throw new Error('socket sk-ant-test-key');
-    }) as unknown as typeof fetch;
-    expect((await runPoint(context, [], deps(thrown))).class).toBe('failed');
+  it('marks an outcome without reported usage as unmetered, but still classifies it', async () => {
+    const { point, context } = setup(reachableSession());
+    const outcome = await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [edit(VALUE)], usage: null }))]).runner));
+    expect(outcome).toMatchObject({ class: 'same', tokens: 0, unmetered: true });
   });
 
   it('classifies a proposed edit and writes nothing', async () => {
@@ -351,17 +531,32 @@ describe('runPoint', () => {
     dirs.push(dir);
     const real = join(dir, 'billing.ts');
     writeFileSync(real, VALUE);
-    const context = pointContext(pointOf(reachableSession()));
-    const model = scripted([[toolUse('Edit', { file_path: real, old_string: VALUE, new_string: 'changed' })]]);
-    await runPoint(context, [], deps(model.fetch));
+    const { point, context } = setup(reachableSession());
+    await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [edit(VALUE, real)] }))]).runner));
     expect(readFileSync(real, 'utf8')).toBe(VALUE);
     expect(readdirSync(dir)).toEqual(['billing.ts']);
   });
 });
 
+describe('runText', () => {
+  it('returns the result text and its cost, and says why when there is none', async () => {
+    const good = await runText('prompt', deps(scripted([ok(stream({ text: 'the gist' }))]).runner));
+    expect(good).toEqual({ text: 'the gist', tokens: 110, unmetered: false });
+    expect((await runText('p', deps(scripted([ok(stream({ text: '' }))]).runner))).reason).toBe('empty summary');
+    expect((await runText('p', deps(scripted([ok(stream({ isError: true }))]).runner))).reason).toBe('error result');
+    expect((await runText('p', deps(scripted([{ ok: false, reason: 'timeout' }]).runner))).reason).toBe('timeout');
+  });
+});
+
 // --- report ------------------------------------------------------------------------
 
-const outcome = (c: Outcome['class'], lookups = 0, seconds = 1): Outcome => ({ class: c, lookups, seconds, tokens: 10 });
+const outcome = (c: Outcome['class'], lookups = 0, seconds = 1, reason?: string): Outcome => ({
+  class: c,
+  lookups,
+  seconds,
+  tokens: 10,
+  ...(reason === undefined ? {} : { reason }),
+});
 
 const record = (control: Outcome, compacted: Outcome, session = 's.jsonl'): PointRecord => ({
   session,
@@ -379,7 +574,7 @@ const info = (extra: Partial<RunInfo> = {}): RunInfo => ({
   tried: 2,
   tokens: 40,
   tokenCap: 1000,
-  stoppedEarly: false,
+  stopped: undefined,
   summaryRan: false,
   ...extra,
 });
@@ -390,7 +585,7 @@ describe('report', () => {
       summarize(
         [
           record(outcome('same'), outcome('recovered', 2, 3)),
-          record(outcome('same'), outcome('failed')),
+          record(outcome('same'), outcome('failed', 0, 1, 'timeout')),
           record(outcome('wrong'), outcome('recovered', 4, 5)),
         ],
         info(),
@@ -402,6 +597,21 @@ describe('report', () => {
     expect(text).toContain('recovered: median 3 extra lookups, 4.0 s');
   });
 
+  it('lists the fixed reasons of failed runs per arm, and why the run stopped', () => {
+    const text = formatReport(
+      summarize(
+        [
+          record(outcome('failed', 0, 1, 'exit 1'), outcome('failed', 0, 1, 'stub not connected')),
+          record(outcome('failed', 0, 1, 'exit 1'), outcome('failed', 0, 1, 'stub not connected')),
+        ],
+        info({ stopped: 'every arm failed to run' }),
+      ),
+    );
+    expect(text).toContain('failed to run: exit 1 x2');
+    expect(text).toContain('failed to run: stub not connected x2');
+    expect(text).toContain('stopped early (2 point(s) done): every arm failed to run');
+  });
+
   it('says the difference is within the control arm when compacted does not exceed it', () => {
     const text = formatReport(summarize([record(outcome('wrong'), outcome('wrong'))], info()));
     expect(text).toContain('wrong: compacted 1, control 1 - within what the control arm shows');
@@ -409,10 +619,11 @@ describe('report', () => {
     expect(worse).toContain('wrong: compacted 1, control 0 - more than the control arm shows');
   });
 
-  it('states that the summary arm was not run, and prints no figure for it', () => {
+  it('states that the summary arm was not run, prints no figure for it, and names the flattening caveat', () => {
     const text = formatReport(summarize([record(outcome('same'), outcome('same'))], info()));
     expect(text).toContain('Summary arm not run');
     expect(text).not.toContain('Arm: summary');
+    expect(text).toContain('reaches the model as text');
   });
 
   it('is a pure function of its input', () => {
@@ -421,37 +632,40 @@ describe('report', () => {
   });
 });
 
-// --- the runner ---------------------------------------------------------------------
+// --- the runner -----------------------------------------------------------------------------
 
 const ARGS = ['--model', 'test-model', '--max-points', '2', '--token-cap', '100000'];
-const ENV = { ANTHROPIC_API_KEY: 'sk-ant-test-key' };
 
 /** Acts like a model that needs the lost value: right with it in view, a guess without it. */
 const needsTheValue = () =>
-  fakeFetch((request) => {
-    const answer = textOf(request.messages).includes(VALUE) ? VALUE : 'a guess at the code';
-    return okBody([toolUse('Edit', { file_path: 'src/billing.ts', old_string: answer, new_string: 'n' })]);
-  });
+  fakeRunner((request) =>
+    ok(stream({ calls: [edit(request.prompt.includes(VALUE) ? VALUE : 'a guess at the code')] })),
+  );
+
+const runWith = (argv: string[], runner: ChildRunner, extra: Parameters<typeof run>[1] = {}) =>
+  run(argv, { runner, createScratch: fakeScratch, now: clock(), ...extra });
 
 describe('run', () => {
   it('runs both arms end to end over a corpus and prints a report with both', async () => {
     const root = corpus({ 'p/s.jsonl': reachableSession() });
     const model = needsTheValue();
-    const result = await run([...ARGS, '--root', root], ENV, { fetch: model.fetch, now: clock() });
+    const scratch = fakeScratch();
+    const result = await runWith([...ARGS, '--root', root], model.runner, { createScratch: () => scratch });
     expect(result.code).toBe(0);
     expect(result.output).toContain('Arm: control (1 judged, 0 failed to run)');
     expect(result.output).toContain('Arm: compacted (1 judged, 0 failed to run)');
     expect(result.output).toContain('wrong: compacted 1, control 0 - more than the control arm shows');
     expect(model.requests).toHaveLength(2);
+    expect(scratch.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('gives the same report twice for the same corpus and scripted model', async () => {
     const root = corpus({ 'p/s.jsonl': reachableSession(), 'p/t.jsonl': unreachableSession() });
-    const once = async () => (await run([...ARGS, '--root', root], ENV, { fetch: needsTheValue().fetch, now: clock() })).output;
+    const once = async () => (await runWith([...ARGS, '--root', root], needsTheValue().runner)).output;
     expect(await once()).toBe(await once());
   });
 
-  it('keeps transcript text and the key out of the report', async () => {
+  it('keeps transcript text out of the report and out of every argument list', async () => {
     const secretValue = 'return decryptVault("hunter2-super-secret-token");';
     const secretFile = 'src/secret-path-xyz.ts';
     const secretCommand = 'curl https://internal.example/secret-command-xyz';
@@ -463,133 +677,123 @@ describe('run', () => {
       editing(secretValue, secretFile),
     );
     const root = corpus({ 'p/s.jsonl': messages });
-    const model = fakeFetch(() =>
-      okBody([toolUse('Edit', { file_path: secretFile, old_string: secretValue, new_string: 'secret-new-text' })]),
-    );
-    const result = await run([...ARGS, '--root', root], { ANTHROPIC_API_KEY: 'sk-ant-the-real-key' }, { fetch: model.fetch, now: clock() });
+    const model = fakeRunner(() => ok(stream({ calls: [call('Edit', { file_path: secretFile, old_string: secretValue, new_string: 'secret-new-text' })] })));
+    const result = await runWith([...ARGS, '--root', root], model.runner);
     expect(result.code).toBe(0);
-    for (const secret of ['hunter2', 'secret-path-xyz', 'secret-command-xyz', 'secret-new-text', 'the-real-key', 'curl']) {
+    for (const secret of ['hunter2', 'secret-path-xyz', 'secret-command-xyz', 'secret-new-text', 'curl']) {
       expect(result.output).not.toContain(secret);
+      expect(textOf(model.requests.map((r) => r.args))).not.toContain(secret);
     }
   });
 
-  it('refuses without every required input, naming each, before any corpus read or request', async () => {
+  it('refuses without every required input, naming each, before any corpus read or child process', async () => {
     const model = scripted([]);
     const reader = vi.fn(lostPoints);
-    const result = await run([], {}, { fetch: model.fetch, lostPoints: reader });
+    const scratch = vi.fn(fakeScratch);
+    const result = await runWith([], model.runner, { lostPoints: reader, createScratch: scratch });
     expect(result.code).toBe(1);
-    for (const name of ['--model', '--max-points', '--token-cap', 'ANTHROPIC_API_KEY']) {
-      expect(result.output).toContain(name);
-    }
-    const onlyKey = await run(['--model', 'm', '--max-points', '1'], ENV, { fetch: model.fetch, lostPoints: reader });
-    expect(onlyKey.output).toContain('--token-cap');
-    expect(onlyKey.output).not.toContain('--model');
+    for (const name of ['--model', '--max-points', '--token-cap']) expect(result.output).toContain(name);
+    const partial = await runWith(['--model', 'm', '--max-points', '1'], model.runner, { lostPoints: reader, createScratch: scratch });
+    expect(partial.output).toContain('--token-cap');
+    expect(partial.output).not.toContain('--model');
     expect(model.impl).not.toHaveBeenCalled();
     expect(reader).not.toHaveBeenCalled();
+    expect(scratch).not.toHaveBeenCalled();
   });
 
-  it('refuses a missing root and a corpus with no lost point, sending nothing', async () => {
+  it('refuses a missing root and a corpus with no lost point, starting nothing', async () => {
     const model = scripted([]);
-    const missing = await run([...ARGS, '--root', join(tmpdir(), 'behaviour-no-such-root')], ENV, { fetch: model.fetch });
+    const scratch = vi.fn(fakeScratch);
+    const missing = await runWith([...ARGS, '--root', join(tmpdir(), 'behaviour-no-such-root')], model.runner, { createScratch: scratch });
     expect(missing.code).toBe(1);
-    const empty = await run([...ARGS, '--root', corpus({})], ENV, { fetch: model.fetch });
+    const empty = await runWith([...ARGS, '--root', corpus({})], model.runner, { createScratch: scratch });
     expect(empty.code).toBe(1);
     expect(empty.output).toContain('No lost point');
     expect(model.impl).not.toHaveBeenCalled();
+    expect(scratch).not.toHaveBeenCalled();
   });
 
   it('refuses arguments that are not positive whole numbers', async () => {
-    const result = await run(['--model', 'm', '--max-points', '0', '--token-cap', 'lots'], ENV, { fetch: scripted([]).fetch });
+    const result = await runWith(['--model', 'm', '--max-points', '0', '--token-cap', 'lots'], scripted([]).runner);
     expect(result.code).toBe(1);
   });
 
   it('finishes the point in progress at the token cap and starts no more', async () => {
     const root = corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': reachableSession() });
     const model = needsTheValue();
-    const result = await run(
-      ['--model', 'm', '--max-points', '2', '--token-cap', '1', '--root', root],
-      ENV,
-      { fetch: model.fetch, now: clock() },
-    );
+    const result = await runWith(['--model', 'm', '--max-points', '2', '--token-cap', '1', '--root', root], model.runner);
     expect(result.code).toBe(0);
     expect(model.requests).toHaveLength(2);
-    expect(result.output).toContain('stopped early (1 point(s) done)');
+    expect(result.output).toContain('stopped early (1 point(s) done): token cap reached');
     expect(result.output).toContain('Tokens: 220 used, cap 1');
   });
 
-  it('counts the tokens of every call, lookups included', async () => {
-    const root = corpus({ 'p/a.jsonl': reachableSession() });
-    const model = fakeFetch((request) => {
-      const last = request.messages.at(-1)!;
-      const answered = Array.isArray(last.content) && textOf(last.content).includes('tool_result');
-      return okBody(
-        answered
-          ? [toolUse('Edit', { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'n' })]
-          : [toolUse('Read', { file_path: 'src/billing.ts' })],
-      );
-    });
-    const result = await run([...ARGS, '--root', root], ENV, { fetch: model.fetch, now: clock() });
-    expect(model.requests.length).toBeGreaterThanOrEqual(4);
-    expect(result.output).toContain(`Tokens: ${model.requests.length * 110} used`);
+  it('stops after a point whose usage was not reported, because the cap cannot be enforced', async () => {
+    const root = corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': reachableSession() });
+    const model = fakeRunner(() => ok(stream({ calls: [edit(VALUE)], usage: null })));
+    const result = await runWith([...ARGS, '--root', root], model.runner);
+    expect(model.requests).toHaveLength(2);
+    expect(result.output).toContain('usage not reported, so the cap cannot be enforced');
   });
 
-  it('never puts the key into output or errors, even when requests fail', async () => {
+  it('stops when every arm failed, and lists the reasons', async () => {
+    const root = corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': reachableSession() });
+    const model = fakeRunner(() => ({ ok: false, reason: 'cannot start claude' }));
+    const result = await runWith([...ARGS, '--root', root], model.runner);
+    expect(model.requests).toHaveLength(2);
+    expect(result.output).toContain('failed to run: cannot start claude x1');
+    expect(result.output).toContain('every arm failed to run');
+  });
+
+  it('removes the scratch directory even when a child cannot be started', async () => {
     const root = corpus({ 'p/a.jsonl': reachableSession() });
-    const key = 'sk-ant-must-not-leak';
-    const broken = vi.fn(async () => {
-      throw new Error(`connect failed with ${key}`);
-    }) as unknown as typeof fetch;
-    const result = await run([...ARGS, '--root', root], { ANTHROPIC_API_KEY: key }, { fetch: broken, now: clock() });
-    expect(result.code).toBe(0);
-    expect(result.output).not.toContain(key);
-    expect(result.output).toContain('failed to run');
-    const refused = await run(['--model', 'm'], { ANTHROPIC_API_KEY: key });
-    expect(refused.output).not.toContain(key);
+    const scratch = fakeScratch();
+    const boom = fakeRunner(() => {
+      throw new Error('spawn exploded');
+    });
+    await expect(runWith([...ARGS, '--root', root], boom.runner, { createScratch: () => scratch })).rejects.toThrow('spawn exploded');
+    expect(scratch.cleanup).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('run with the summary arm', () => {
   const SUMMARY = 'SUMMARY-TEXT-ONLY: the invoice total needs fixing';
-  /** Answers a request without tools with a summary, and every other request with the right edit. */
+  /** A request without the stub is the summary call; every other request gets the right edit. */
   const summarising = () =>
-    fakeFetch((request) =>
-      request.tools === undefined
-        ? okBody([{ type: 'text', text: SUMMARY }])
-        : okBody([toolUse('Edit', { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'n' })]),
+    fakeRunner((request) =>
+      request.args.includes('--mcp-config') ? ok(stream({ calls: [edit(VALUE)] })) : ok(stream({ text: SUMMARY })),
     );
 
   it('adds a third, approximate arm built from one extra call, counted toward the tokens', async () => {
     const root = corpus({ 'p/a.jsonl': reachableSession() });
     const model = summarising();
-    const result = await run([...ARGS, '--root', root, '--summary'], ENV, { fetch: model.fetch, now: clock() });
+    const result = await runWith([...ARGS, '--root', root, '--summary'], model.runner);
     expect(result.code).toBe(0);
     expect(result.output).toContain('Arm: summary (approximate');
     expect(result.output).toContain('summary=same');
     expect(model.requests).toHaveLength(4);
     expect(result.output).toContain('Tokens: 440 used');
-    const armRequest = model.requests[3]!;
-    expect(armRequest.messages).toHaveLength(1);
-    expect(textOf(armRequest.messages)).toContain(SUMMARY);
-    expect(textOf(armRequest.messages)).not.toContain(VALUE);
+    const armPrompt = model.requests[3]!.prompt;
+    expect(armPrompt).toContain(SUMMARY);
+    expect(armPrompt).not.toContain(VALUE);
+    expect(model.requests[2]!.prompt).toContain(SUMMARY_REQUEST);
   });
 
-  it('counts a failed summary call as a failed run of that arm', async () => {
+  it('counts a failed summary call as a failed run of that arm, with its reason', async () => {
     const root = corpus({ 'p/a.jsonl': reachableSession() });
-    const model = fakeFetch((request) =>
-      request.tools === undefined
-        ? new Response('no', { status: 500 })
-        : okBody([toolUse('Edit', { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'n' })]),
+    const model = fakeRunner((request) =>
+      request.args.includes('--mcp-config') ? ok(stream({ calls: [edit(VALUE)] })) : ok(stream({ isError: true })),
     );
-    const result = await run([...ARGS, '--root', root, '--summary'], ENV, { fetch: model.fetch, now: clock() });
-    expect(result.output).toContain('Arm: summary (approximate: does not re-attach recently read files) (0 judged, 1 failed to run)');
+    const result = await runWith([...ARGS, '--root', root, '--summary'], model.runner);
+    expect(result.output).toContain('(0 judged, 1 failed to run)');
+    expect(result.output).toContain('failed to run: error result x1');
   });
 
   it('says the summary arm was not run, and prints no figure for it, without --summary', async () => {
     const root = corpus({ 'p/a.jsonl': reachableSession() });
-    const result = await run([...ARGS, '--root', root], ENV, { fetch: summarising().fetch, now: clock() });
+    const result = await runWith([...ARGS, '--root', root], summarising().runner);
     expect(result.output).toContain('Summary arm not run');
     expect(result.output).not.toContain('Arm: summary');
     expect(result.output).not.toContain('summary=');
   });
 });
-

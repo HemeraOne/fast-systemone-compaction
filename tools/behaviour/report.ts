@@ -18,7 +18,8 @@ export interface RunInfo {
   tried: number;
   tokens: number;
   tokenCap: number;
-  stoppedEarly: boolean;
+  /** Why the run ended before the sample was done; `undefined` when it ran to the end. */
+  stopped: string | undefined;
   summaryRan: boolean;
 }
 
@@ -29,6 +30,8 @@ export interface ArmSummary {
   total: number;
   medianLookups: number | undefined;
   medianSeconds: number | undefined;
+  /** The fixed reasons of `failed` outcomes with how often each occurred, e.g. `exit 1 x2`. */
+  failures: string[];
 }
 
 export interface Summary {
@@ -45,6 +48,15 @@ function median(values: readonly number[]): number | undefined {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+/** `reason xN` for each distinct reason, in order of first appearance. */
+function failureReasons(outcomes: readonly Outcome[]): string[] {
+  const counts = new Map<string, number>();
+  for (const outcome of outcomes) {
+    if (outcome.class === 'failed') counts.set(outcome.reason ?? 'unknown', (counts.get(outcome.reason ?? 'unknown') ?? 0) + 1);
+  }
+  return [...counts].map(([reason, n]) => `${reason} x${n}`);
 }
 
 export function summarize(points: readonly PointRecord[], run: RunInfo): Summary {
@@ -64,6 +76,7 @@ export function summarize(points: readonly PointRecord[], run: RunInfo): Summary
         total: outcomes.length - counts.failed,
         medianLookups: median(recovered.map((outcome) => outcome.lookups)),
         medianSeconds: median(recovered.map((outcome) => outcome.seconds)),
+        failures: failureReasons(outcomes),
       };
     }),
   };
@@ -84,6 +97,7 @@ function armLines(summary: ArmSummary): string[] {
       `  recovered: median ${summary.medianLookups} extra lookups, ${summary.medianSeconds.toFixed(1)} s`,
     );
   }
+  if (summary.failures.length > 0) lines.push(`  failed to run: ${summary.failures.join(', ')}`);
   return lines;
 }
 
@@ -109,7 +123,7 @@ export function formatReport(summary: Summary): string {
     'Behaviour test: what the assistant does at points where compaction lost a value',
     `Model: ${run.model}`,
     `Corpus: ${run.sessions} sessions, ${run.available} lost points available, ${run.tried} tried`,
-    `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stoppedEarly ? ` - stopped early (${run.tried} point(s) done)` : ''}`,
+    `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stopped === undefined ? '' : ` - stopped early (${run.tried} point(s) done): ${run.stopped}`}`,
     '',
   ];
   for (const arm of summary.arms) lines.push(...armLines(arm), '');
@@ -124,10 +138,11 @@ export function formatReport(summary: Summary): string {
   }
   lines.push(
     '',
-    'Caveats: a stand-in system prompt and five stub tools replace Claude Code\'s own, so rates are',
-    'not the real app\'s; lookups are answered only for exact repeats (Read matches on path), so a',
-    'recovery by another command or pattern counts as not available; with this few points, read the',
-    'counts, not the percentages.',
+    'Caveats: a stand-in system prompt and five stub tools replace Claude Code\'s own, and the history',
+    'reaches the model as text rather than as real tool turns, so rates are not the real app\'s;',
+    'lookups are answered only for exact repeats (Read matches on path), so a recovery by another',
+    'command or pattern counts as not available; with this few points, read the counts, not the',
+    'percentages.',
   );
   return lines.join('\n');
 }
