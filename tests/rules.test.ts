@@ -486,6 +486,18 @@ describe('rule 1: reads of files edited later', () => {
   });
 });
 
+describe('duplicate tool_use_ids', () => {
+  it('leaves calls that share an id untouched instead of letting one decision hit both', () => {
+    const big = 'z'.repeat(9000);
+    const first = read('same', 'f.ts', big);
+    const later = read('same', 'f.ts', 'new');
+    const out = compactByRules(session([...first, ...later, ...pair('o', 'Bash', { command: 'ls' }, big)]), OPTIONS);
+    expect(out.messages.slice(1, 5)).toEqual([...first, ...later]);
+    expect(resultText(out.messages, 'o')).toContain('truncated 8700 chars');
+    expect(out.stats.calls).toBe(1);
+  });
+});
+
 describe('performance', () => {
   it('compacts a 10,000-message transcript in well under a second', () => {
     const middle: Message[] = [];
