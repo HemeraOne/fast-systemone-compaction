@@ -223,25 +223,31 @@ not part of the plugin or the published package.
 
 ### Behaviour test
 
-`ANTHROPIC_API_KEY=... npm run behaviour -- --model <id> --max-points <n>
---token-cap <n>` asks what the assistant actually does at the points where the
-replay found a lost value. It sends sampled session history to the Anthropic
-API, so it costs tokens and shares those transcripts with the model provider;
-it runs only when all three flags and the key are given, and stops starting new
-points once the token cap is reached. For each point it runs the compacted
-history and the uncompacted one (the control), lets the model take its next
-step with five stub tools answered from the recorded history, and compares that
-step with the recorded one: `same` (right at once), `recovered` (right after
-extra lookups), `wrong` (a different action), `gave-up` (no action or too many
-lookups), `unreachable` (the lost value could not be recovered by any stub,
-and the action was not right), `failed` (the call did not run; left out of the
-rates). The report lists counts, extra lookups, elapsed time, and the control's
-own deviation, never transcript text, and nothing is written to your files.
-`-- --summary` adds an approximate third arm built from a model-written summary;
-it does not re-attach recently read files as the built-in summary does. Caveats:
-a stand-in system prompt and tool set replace Claude Code's own, lookups match
-only exact repeats (a `Read` matches on path), and the point count is small. The
-code lives in `tools/behaviour/`, not in the plugin or the published package.
+`npm run behaviour -- --model <alias-or-id> --max-points <n> --token-cap <n>`
+asks what the assistant actually does at the points where the replay found a
+lost value. It runs the `claude` CLI in print mode on your own login (no API
+key), so it uses plan usage and shares the sampled session history with the
+model provider; it runs only when all three flags are given, and stops starting
+new points once the tokens the CLI reports reach the cap. For each point it runs
+the compacted history and the uncompacted one (the control) in an isolated
+child (`--safe-mode`, no built-in tools, no saved session), lets the model take
+its next step with five stub tools served by a small MCP server from the
+recorded history, and compares that step with the recorded one: `same` (right
+at once), `recovered` (right after extra lookups), `wrong` (a different action),
+`gave-up` (no action or too many lookups), `unreachable` (the lost value could
+not be recovered by any stub, and the action was not right), `failed` (the child
+did not run; left out of the rates, with a fixed reason in the report). The
+report lists counts, extra lookups, elapsed time, and the control's own
+deviation, never transcript text; the only files written are in a temporary
+scratch directory that is removed at the end. `-- --summary` adds an approximate
+third arm built from a model-written summary; it does not re-attach recently
+read files as the built-in summary does. Caveats: the history reaches the model
+as text rather than as real tool turns, a stand-in system prompt and tool set
+replace Claude Code's own, lookups match only exact repeats (a `Read` matches on
+path), the point count is small, and the CLI details the tool relies on are
+checked only by the first real run, which reports fixed failure reasons if one
+is wrong. The code lives in `tools/behaviour/`, not in the plugin or the
+published package.
 
 ## Animated demo (macOS)
 
