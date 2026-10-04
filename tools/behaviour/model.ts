@@ -33,7 +33,12 @@ export function buildArgs(options: ArgsOptions): string[] {
     '--output-format',
     'stream-json',
     '--verbose',
-    '--safe-mode',
+    // Not `--safe-mode`: its help text says it disables MCP servers, and the first runs listed no
+    // stub. The settings source `project` skips the user's settings, hooks and plugins; the
+    // working directory is empty, so no project settings or CLAUDE.md exist either.
+    '--setting-sources',
+    'project',
+    '--disable-slash-commands',
     '--no-session-persistence',
     '--model',
     options.model,
@@ -270,6 +275,8 @@ export interface Scratch {
   cwd: string;
   /** Writes the MCP config that starts the stub for this point and returns its path. */
   mcpConfigFor(point: StubPoint): string;
+  /** Writes a synthetic file into the scratch directory and returns its path. */
+  file(name: string, content: string): string;
   cleanup(): void;
 }
 
@@ -303,6 +310,11 @@ export function createScratch(): Scratch {
         },
       };
       writeFileSync(path, JSON.stringify(config));
+      return path;
+    },
+    file(name, content) {
+      const path = join(dir, name);
+      writeFileSync(path, content);
       return path;
     },
     cleanup() {

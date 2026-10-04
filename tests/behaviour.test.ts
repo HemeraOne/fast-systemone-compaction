@@ -187,7 +187,12 @@ function scripted(results: ChildResult[]) {
 }
 
 function fakeScratch(): Scratch & { cleanup: ReturnType<typeof vi.fn> } {
-  return { cwd: '/scratch/work', mcpConfigFor: () => '/scratch/mcp.json', cleanup: vi.fn() };
+  return {
+    cwd: '/scratch/work',
+    mcpConfigFor: () => '/scratch/mcp.json',
+    file: vi.fn((name: string) => `/scratch/${name}`),
+    cleanup: vi.fn(),
+  };
 }
 
 function clock(): () => number {
@@ -337,10 +342,12 @@ describe('matchesRecorded', () => {
 describe('buildArgs', () => {
   it('isolates the child, keeps the subscription login usable, and names no key', () => {
     const args = buildArgs({ model: 'sonnet', mcpConfig: '/scratch/mcp.json' });
-    for (const flag of ['-p', '--safe-mode', '--no-session-persistence', '--strict-mcp-config', '--verbose']) {
+    for (const flag of ['-p', '--disable-slash-commands', '--no-session-persistence', '--strict-mcp-config', '--verbose']) {
       expect(args).toContain(flag);
     }
     expect(args).not.toContain('--bare');
+    expect(args).not.toContain('--safe-mode');
+    expect(args.slice(args.indexOf('--setting-sources'), args.indexOf('--setting-sources') + 2)).toEqual(['--setting-sources', 'project']);
     expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'sonnet']);
     expect(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 2)).toEqual(['--tools', '']);
     expect(args[args.indexOf('--mcp-config') + 1]).toBe('/scratch/mcp.json');
@@ -842,5 +849,43 @@ describe('run with the summary arm', () => {
     expect(result.output).toContain('Summary arm not run');
     expect(result.output).not.toContain('Arm: summary');
     expect(result.output).not.toContain('summary=');
+  });
+});
+
+describe('run --check', () => {
+  const CHECK = ['--check', '--model', 'sonnet'];
+
+  it('reports OK when the model called a stub tool, sends only the synthetic prompt, and needs no cap', async () => {
+    const model = fakeRunner(() => ok(stream({ calls: [call('Read', { file_path: 'check.txt' })] })));
+    const scratch = fakeScratch();
+    const result = await runWith(CHECK, model.runner, { createScratch: () => scratch });
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('Result: OK');
+    expect(result.output).toContain('Stub tool calls seen: 1');
+    expect(result.output).toContain('Tokens used: 110');
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.prompt).toContain('connectivity check');
+    expect(scratch.file).toHaveBeenCalledTimes(1);
+    expect(scratch.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a problem with its reason when the child cannot use the stub', async () => {
+    const notListed = await runWith(CHECK, fakeRunner(() => ok(stream({ init: { mcp_servers: [] } }))).runner);
+    expect(notListed.code).toBe(1);
+    expect(notListed.output).toContain('PROBLEM');
+    expect(notListed.output).toContain('stub not connected (not listed)');
+    const silent = await runWith(CHECK, fakeRunner(() => ok(stream())).runner);
+    expect(silent.code).toBe(1);
+    expect(silent.output).toContain('the model made no stub tool call');
+  });
+
+  it('needs --model and nothing else, and refuses without it before starting anything', async () => {
+    const model = scripted([]);
+    const scratch = vi.fn(fakeScratch);
+    const result = await runWith(['--check'], model.runner, { createScratch: scratch });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('--model');
+    expect(model.impl).not.toHaveBeenCalled();
+    expect(scratch).not.toHaveBeenCalled();
   });
 });

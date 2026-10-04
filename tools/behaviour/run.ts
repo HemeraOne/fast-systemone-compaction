@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compactedHistory, controlHistory, flattenHistory, pointContext, summaryHistory, summaryPrompt } from './history.js';
+import { runCheck } from './check.js';
 import { createScratch, spawnChild } from './model.js';
 import type { ChildRunner, Scratch } from './model.js';
 import { formatReport, summarize } from './report.js';
@@ -75,6 +76,16 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     ...overrides,
   };
   const [model, maxPointsText, tokenCapText, rootArg] = VALUE_FLAGS.map((flag) => flagValue(argv, flag));
+
+  if (argv.includes('--check')) {
+    if (model === undefined) return { code: 1, output: 'Missing required input: --model <id>' };
+    const scratch = deps.createScratch();
+    try {
+      return await runCheck({ runner: deps.runner, scratch, model, now: deps.now });
+    } finally {
+      scratch.cleanup();
+    }
+  }
 
   const missing = [
     ...(model === undefined ? ['--model <id>'] : []),
