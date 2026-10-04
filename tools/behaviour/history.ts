@@ -3,13 +3,6 @@ import type { Message, ToolUse } from '../../src/index.js';
 import { candidatesOf } from '../replay/replay.js';
 import type { LostPoint } from './select.js';
 
-export type ApiBlock = Record<string, unknown>;
-
-export interface ApiMessage {
-  role: 'user' | 'assistant';
-  content: ApiBlock[];
-}
-
 /** The history the assistant had before the recorded step, uncompacted. */
 export function controlHistory(messages: readonly Message[], k: number): Message[] {
   return messages.slice(0, k);
@@ -20,36 +13,42 @@ export function compactedHistory(messages: readonly Message[], k: number): Messa
   return compactByRules(controlHistory(messages, k)).messages;
 }
 
+const INTRO =
+  'Below is the conversation so far between a user and an assistant working in a software project, ' +
+  'including the tool calls the assistant made and what they returned. Parts of long tool results ' +
+  'may have been left out and marked as such.';
+
+const OUTRO =
+  'Continue as the assistant: take the next step now by calling one of your tools (Read, Grep, Glob, ' +
+  'Edit or Bash, which may be listed with an mcp__stub__ prefix). Do not describe what you would do.';
+
 /**
- * Library messages as Messages API messages: text, tool_use and tool_result blocks, empty
- * text skipped, consecutive messages of one role merged (the API needs alternating roles).
+ * The messages as a labelled text transcript. The CLI cannot take earlier tool-call turns as
+ * structured input, so a history reaches the model as text (research R3); both arms are
+ * rendered the same way.
  */
-export function toApiMessages(messages: readonly Message[]): ApiMessage[] {
-  const out: ApiMessage[] = [];
+export function renderTranscript(messages: readonly Message[]): string {
+  const names = new Map<string, string>();
+  const parts: string[] = [];
   for (const message of messages) {
-    const content: ApiBlock[] = [];
-    if (message.role === 'user') {
-      for (const result of message.toolResults ?? []) {
-        content.push({
-          type: 'tool_result',
-          tool_use_id: result.tool_use_id,
-          content: result.text,
-          is_error: result.isError === true,
-        });
-      }
-      if (message.text !== '') content.push({ type: 'text', text: message.text });
-    } else {
-      if (message.text !== '') content.push({ type: 'text', text: message.text });
-      for (const use of message.toolUses) {
-        content.push({ type: 'tool_use', id: use.tool_use_id, name: use.tool, input: use.input });
-      }
+    if (message.text !== '') parts.push(`=== ${message.role} ===\n${message.text}`);
+    for (const use of message.toolUses) {
+      names.set(use.tool_use_id, use.tool);
+      parts.push(`--- assistant tool call: ${use.tool} ---\n${JSON.stringify(use.input)}`);
     }
-    if (content.length === 0) continue;
-    const last = out[out.length - 1];
-    if (last?.role === message.role) last.content.push(...content);
-    else out.push({ role: message.role, content });
+    for (const result of message.toolResults ?? []) {
+      const name = names.get(result.tool_use_id) ?? 'tool';
+      parts.push(`--- tool result: ${name}${result.isError === true ? ' (error)' : ''} ---\n${result.text}`);
+    }
   }
-  return out;
+  return parts.join('\n\n');
+}
+
+const framed = (body: string): string => `${INTRO}\n\n${body}\n\n${OUTRO}`;
+
+/** The prompt of an arm that shows a history: the transcript between the intro and the request. */
+export function flattenHistory(messages: readonly Message[]): string {
+  return framed(renderTranscript(messages));
 }
 
 /** The fixed request that produces the approximate built-in-summary arm. */
@@ -57,19 +56,14 @@ export const SUMMARY_REQUEST =
   'Summarize the conversation so far so that work can continue from your summary alone: the goal, ' +
   'what has been done, the files involved, and what remains.';
 
-/** The control history followed by the summarisation request, as one API conversation. */
-export function summaryRequestMessages(history: readonly ApiMessage[]): ApiMessage[] {
-  const request: ApiBlock = { type: 'text', text: SUMMARY_REQUEST };
-  const last = history[history.length - 1];
-  return last?.role === 'user'
-    ? [...history.slice(0, -1), { role: 'user', content: [...last.content, request] }]
-    : [...history, { role: 'user', content: [request] }];
+/** The prompt of the tool-less call that writes the summary of a history. */
+export function summaryPrompt(messages: readonly Message[]): string {
+  return `${renderTranscript(messages)}\n\n${SUMMARY_REQUEST}`;
 }
 
-/** The summary arm's whole history: the summary as one user message. */
-export function summaryHistory(summary: string): ApiMessage[] {
-  return [{ role: 'user', content: [{ type: 'text', text: `Summary of the conversation so far:
-${summary}` }] }];
+/** The summary arm's prompt: the summary stands in for the whole history. */
+export function summaryHistory(summary: string): string {
+  return framed(`=== summary of the conversation so far ===\n${summary}`);
 }
 
 export interface ToolCallRequest {
@@ -187,7 +181,7 @@ export interface PointContext {
   reachable: boolean;
 }
 
-export function pointContext(point: LostPoint): PointContext {
+export function pointContext(point: Pick<LostPoint, 'messages' | 'messageIndex' | 'toolUseId'>): PointContext {
   const step = point.messages[point.messageIndex]?.toolUses.find((use) => use.tool_use_id === point.toolUseId);
   if (step === undefined) throw new Error('the recorded step is missing from its session');
   const prefix = controlHistory(point.messages, point.messageIndex);

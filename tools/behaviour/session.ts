@@ -1,6 +1,9 @@
 import { familyOf, matchesRecorded } from './history.js';
-import type { ApiBlock, ApiMessage, PointContext } from './history.js';
-import { callModel, TOOLS } from './model.js';
+import type { PointContext } from './history.js';
+import { buildArgs, CHILD_TIMEOUT_MS, parseStream } from './model.js';
+import type { ChildRunner, Scratch } from './model.js';
+import type { LostPoint } from './select.js';
+import { MAX_LOOKUPS } from './stub.js';
 
 export type Arm = 'control' | 'compacted' | 'summary';
 
@@ -11,72 +14,94 @@ export interface Outcome {
   /** Lookups issued before the terminal action, answerable or not. */
   lookups: number;
   seconds: number;
-  /** Input plus output tokens of this outcome's model calls. */
+  /** Tokens the child reported (input, output, cache). */
   tokens: number;
+  /** Why a `failed` outcome failed: a fixed, non-sensitive phrase. */
+  reason?: string;
+  /** The child reported no usage, so the cap cannot be enforced past this point. */
+  unmetered?: boolean;
 }
 
 export interface SessionDeps {
-  fetch: typeof fetch;
-  apiKey: string;
+  runner: ChildRunner;
+  scratch: Scratch;
   model: string;
   now: () => number;
 }
 
-export const MAX_LOOKUPS = 5;
-
-const NOT_AVAILABLE = 'not available in this test';
-
 /**
- * Lets the model take its next step from `history` and classifies it against the recorded
- * step. The first call in the recorded step's tool family is the terminal action; every other
- * call is a lookup answered from recorded results. Nothing is written anywhere: a proposed
- * edit is only compared.
+ * Lets the model take its next step from `prompt` and classifies it against the recorded
+ * step. The first call in the recorded step's tool family is the terminal action; every
+ * other call is a lookup the stub answers from recorded results. Nothing is written
+ * anywhere: a proposed edit is only compared.
  */
 export async function runPoint(
+  point: LostPoint,
   context: PointContext,
-  history: readonly ApiMessage[],
+  prompt: string,
   deps: SessionDeps,
 ): Promise<Outcome> {
   const started = deps.now();
-  const messages = [...history];
-  let lookups = 0;
-  let tokens = 0;
-  const finish = (outcomeClass: OutcomeClass): Outcome => ({
-    class: outcomeClass,
-    lookups,
-    seconds: (deps.now() - started) / 1000,
-    tokens,
+  const seconds = (at: number): number => (at - started) / 1000;
+  const child = await deps.runner({
+    args: buildArgs({ model: deps.model, mcpConfig: deps.scratch.mcpConfigFor(point) }),
+    prompt,
+    cwd: deps.scratch.cwd,
+    timeoutMs: CHILD_TIMEOUT_MS,
   });
-
-  for (;;) {
-    const reply = await callModel({ apiKey: deps.apiKey, model: deps.model, messages, tools: TOOLS }, deps.fetch);
-    if (!reply.ok) return finish('failed');
-    tokens += reply.inputTokens + reply.outputTokens;
-
-    const calls = reply.content.filter((block) => block['type'] === 'tool_use');
-    if (calls.length === 0) return finish('gave-up');
-
-    const answers: ApiBlock[] = [];
-    for (const block of calls) {
-      const input = block['input'];
-      const call = {
-        tool: String(block['name']),
-        input: typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : {},
-      };
-      if (familyOf(call.tool) === familyOf(context.step.tool)) {
-        if (matchesRecorded(call, context.step, context.prefix)) return finish(lookups === 0 ? 'same' : 'recovered');
-        return finish(context.reachable ? 'wrong' : 'unreachable');
-      }
-      lookups++;
-      if (lookups > MAX_LOOKUPS) return finish('gave-up');
-      const served = context.lookup.serve(call);
-      answers.push({
-        type: 'tool_result',
-        tool_use_id: String(block['id']),
-        content: served ?? NOT_AVAILABLE,
-        is_error: served === undefined,
-      });
-    }
-    messages.push({ role: 'assistant', content: reply.content }, { role: 'user', content: answers });
+  if (!child.ok) {
+    return { class: 'failed', lookups: 0, seconds: seconds(deps.now()), tokens: 0, reason: child.reason, unmetered: true };
   }
+
+  const stream = parseStream(child.lines);
+  const tokens = stream.tokens ?? 0;
+  const unmetered = stream.tokens === undefined;
+  const lastAt = child.lines[child.lines.length - 1]?.at ?? started;
+  const outcome = (cls: OutcomeClass, lookups: number, at: number): Outcome => ({
+    class: cls,
+    lookups,
+    seconds: seconds(at),
+    tokens,
+    ...(unmetered ? { unmetered } : {}),
+  });
+  const failed = (reason: string): Outcome => ({ ...outcome('failed', 0, lastAt), reason });
+
+  if (stream.stubConnected === false) return failed('stub not connected');
+  if (stream.toolsOffered === false) return failed('stub tools not offered');
+  if (stream.compacted) return failed('auto-compacted');
+
+  let lookups = 0;
+  for (const call of stream.calls) {
+    if (familyOf(call.tool) === familyOf(context.step.tool)) {
+      if (matchesRecorded(call, context.step, context.prefix)) return outcome(lookups === 0 ? 'same' : 'recovered', lookups, call.at);
+      return outcome(context.reachable ? 'wrong' : 'unreachable', lookups, call.at);
+    }
+    lookups++;
+    if (lookups > MAX_LOOKUPS) return outcome('gave-up', lookups, call.at);
+  }
+  if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
+  if (stream.isError) return failed('error result');
+  return outcome('gave-up', lookups, lastAt);
+}
+
+/** The text a tool-less child writes for `prompt` (the summary arm), with what it cost. */
+export async function runText(
+  prompt: string,
+  deps: SessionDeps,
+): Promise<{ text: string; tokens: number; unmetered: boolean; reason?: string }> {
+  const child = await deps.runner({
+    args: buildArgs({ model: deps.model }),
+    prompt,
+    cwd: deps.scratch.cwd,
+    timeoutMs: CHILD_TIMEOUT_MS,
+  });
+  if (!child.ok) return { text: '', tokens: 0, unmetered: true, reason: child.reason };
+  const stream = parseStream(child.lines);
+  const reason = !stream.sawResult ? 'no result' : stream.isError ? 'error result' : stream.resultText === '' ? 'empty summary' : undefined;
+  return {
+    text: stream.resultText,
+    tokens: stream.tokens ?? 0,
+    unmetered: stream.tokens === undefined,
+    ...(reason === undefined ? {} : { reason }),
+  };
 }
