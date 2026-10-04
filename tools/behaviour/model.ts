@@ -97,6 +97,8 @@ export interface ParsedStream {
   isError: boolean;
   /** The final result text; only the summary arm uses it. */
   resultText: string;
+  /** The result event's subtype, for example `success` or an error kind; empty when none. */
+  resultSubtype: string;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -115,6 +117,7 @@ export function parseStream(lines: readonly StreamLine[]): ParsedStream {
     sawResult: false,
     isError: false,
     resultText: '',
+    resultSubtype: '',
   };
   const seen = new Set<string>();
   for (const line of lines) {
@@ -156,6 +159,7 @@ export function parseStream(lines: readonly StreamLine[]): ParsedStream {
       parsed.sawResult = true;
       parsed.isError = event['is_error'] === true;
       parsed.resultText = typeof event['result'] === 'string' ? event['result'] : '';
+      parsed.resultSubtype = typeof event['subtype'] === 'string' ? event['subtype'] : '';
       const usage = event['usage'];
       if (isRecord(usage) && typeof usage['input_tokens'] === 'number' && typeof usage['output_tokens'] === 'number') {
         parsed.tokens =

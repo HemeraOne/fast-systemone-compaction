@@ -139,6 +139,7 @@ interface StreamOptions {
   result?: boolean;
   isError?: boolean;
   text?: string;
+  subtype?: string;
 }
 
 /** A child's event stream: init, one assistant event per call (one second apart), the result. */
@@ -159,6 +160,7 @@ function stream(options: StreamOptions = {}): StreamLine[] {
         {
           type: 'result',
           is_error: options.isError === true,
+          ...(options.subtype === undefined ? {} : { subtype: options.subtype }),
           result: options.text ?? 'done',
           ...(options.usage === null ? {} : { usage: options.usage ?? { input_tokens: 100, output_tokens: 10 } }),
         },
@@ -863,6 +865,7 @@ describe('run --check', () => {
     expect(result.output).toContain('Result: OK');
     expect(result.output).toContain('Stub tool calls seen: 1');
     expect(result.output).toContain('Tokens used: 110');
+    expect(result.output).not.toContain('Child result');
     expect(model.requests).toHaveLength(1);
     expect(model.requests[0]!.prompt).toContain('connectivity check');
     expect(scratch.file).toHaveBeenCalledTimes(1);
@@ -874,6 +877,15 @@ describe('run --check', () => {
     expect(notListed.code).toBe(1);
     expect(notListed.output).toContain('PROBLEM');
     expect(notListed.output).toContain('stub not connected (not listed)');
+    const rejected = await runWith(
+      CHECK,
+      fakeRunner(() => ok(stream({ isError: true, subtype: 'error_during_execution', text: 'Please run /login\nto sign in' }))).runner,
+    );
+    expect(rejected.code).toBe(1);
+    expect(rejected.output).toContain('error result');
+    expect(rejected.output).toContain('Child result (error_during_execution): Please run /login to sign in');
+    const noResult = await runWith(CHECK, fakeRunner(() => ok(stream({ result: false }), 3)).runner);
+    expect(noResult.output).toContain('Child exited with code 3 and printed no result');
     const silent = await runWith(CHECK, fakeRunner(() => ok(stream())).runner);
     expect(silent.code).toBe(1);
     expect(silent.output).toContain('the model made no stub tool call');
