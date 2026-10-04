@@ -142,12 +142,19 @@ kept 40/62 messages, no summary (57% reduction; 9 results shortened, 6 reads rem
 a path-only version of the rules removed roughly half of the characters at the
 median. Information loss: a local replay (`npm run replay`, see the root
 README) measures how many of the values the assistant's next tool call used
-(file paths, commands, edit-target text) are gone after compaction. On 258
-local sessions the first rule set lost 3.9% of those values and 14.8% of edit
-targets (28 of 189), split evenly between the two rules; with the current rules
-(reads of later-edited files kept whole, edits no longer removing reads) it loses
-2.1% and 7.4% of edit targets (13 of 175), at a median size reduction of 36.3%
-(46.9% before) with 82.0% of sessions reaching the 25% minimum (91.0% before).
+(file paths, commands, edit-target text) are gone after compaction. On an earlier
+corpus of 258 local sessions the first rule set lost 3.9% of those values and
+14.8% of edit targets (28 of 189), split evenly between the two rules, at a
+median size reduction of 46.9% with 91.0% of sessions reaching the 25% minimum.
+With the current rules (reads of later-edited files kept whole, edits no longer
+removing reads), re-measured on the corpus of 2026-10-04 (217 sessions), it
+loses 2.4% of values and 7.9% of edit targets (11 of 139), at a median size
+reduction of 35.3% with 77.3% of sessions reaching the minimum; all 13 lost
+values come from the large-result rule. The two corpora differ, so the first
+figures are not a like-for-like baseline. Seven of the 11 lost edit targets
+are in a read of the file that the assistant edits next, for the first time:
+the rules cannot know an edit is coming, and keeping every read whole would
+cut the share of sessions reaching the minimum to 29%.
 Sessions that no longer reach it fall back to the built-in summary. Whether
 the remaining loss degrades later assistant behaviour has not been tested; a
 lost value is an upper bound on harm, not proof of it. Treat the rules as the
