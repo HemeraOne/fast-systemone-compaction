@@ -15,7 +15,7 @@ import {
   summaryHistory,
   summaryPrompt,
 } from '../tools/behaviour/history.js';
-import { buildArgs, parseStream, quoteArg } from '../tools/behaviour/model.js';
+import { buildArgs, parseStream, quoteArg, spawnChild, stubFailed } from '../tools/behaviour/model.js';
 import type { ChildRequest, ChildResult, ChildRunner, Scratch, StreamLine } from '../tools/behaviour/model.js';
 import { formatReport, summarize } from '../tools/behaviour/report.js';
 import type { PointRecord, RunInfo } from '../tools/behaviour/report.js';
@@ -117,7 +117,8 @@ function corpus(sessions: Record<string, Message[]>): string {
 }
 
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // A killed child can hold its directory for a moment on Windows, so retry.
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 });
 
 function pointOf(messages: Message[]): LostPoint {
@@ -378,7 +379,7 @@ describe('parseStream', () => {
     );
     const parsed = parseStream(lines);
     expect(parsed.calls.map((c) => [c.tool, c.at])).toEqual([['Read', 2000], ['Edit', 3000]]);
-    expect(parsed).toMatchObject({ stubConnected: true, tokens: 122, sawResult: true, isError: false, resultText: 'done' });
+    expect(parsed).toMatchObject({ stubStatus: 'connected', tokens: 122, sawResult: true, isError: false, resultText: 'done' });
   });
 
   it('skips lines that are not JSON, counts a repeated call once, and reads a missing usage as unknown', () => {
@@ -397,14 +398,45 @@ describe('parseStream', () => {
     expect(parseStream(stream({ calls: [edit(VALUE)] })).compacted).toBe(false);
   });
 
-  it('reports a stub that is not connected, and leaves it unknown when no servers are listed', () => {
-    expect(parseStream(stream({ init: { mcp_servers: [{ name: 'stub', status: 'failed' }] } })).stubConnected).toBe(false);
-    expect(parseStream(stream({ init: { mcp_servers: [] } })).stubConnected).toBe(false);
-    expect(parseStream(stream({ init: {} })).stubConnected).toBeUndefined();
+  it('reads the stub status from the init event: a fixed vocabulary, not listed, or unknown', () => {
+    const statusOf = (servers: unknown) => parseStream(stream({ init: { mcp_servers: servers } })).stubStatus;
+    expect(statusOf([{ name: 'stub', status: 'connected' }])).toBe('connected');
+    expect(statusOf([{ name: 'stub', status: 'pending' }])).toBe('pending');
+    expect(statusOf([{ name: 'stub', status: 'failed' }])).toBe('failed');
+    expect(statusOf([{ name: 'stub', status: 'needs-auth' }])).toBe('needs-auth');
+    expect(statusOf([{ name: 'stub', status: 'some text we do not know' }])).toBe('unknown');
+    expect(statusOf([{ name: 'other', status: 'connected' }])).toBe('not listed');
+    expect(statusOf([])).toBe('not listed');
+    expect(parseStream(stream({ init: {} })).stubStatus).toBeUndefined();
+  });
+
+  it('treats only a definitive status as a failure: pending may still connect', () => {
+    expect(stubFailed('failed') && stubFailed('not listed') && stubFailed('needs-auth') && stubFailed('unknown')).toBe(true);
+    expect(stubFailed('connected') || stubFailed('pending') || stubFailed(undefined)).toBe(false);
   });
 });
 
 // --- the stub -------------------------------------------------------------------------
+
+describe('spawnChild', () => {
+  it('kills a child as soon as its init event says the stub failed, keeping what it printed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'behaviour-spawn-'));
+    dirs.push(dir);
+    const script = join(dir, 'fake-claude.mjs');
+    const init = JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'stub', status: 'failed' }] });
+    writeFileSync(script, `console.log(${JSON.stringify(init)});\nsetInterval(() => {}, 1000);\n`);
+    const started = Date.now();
+    const result = await spawnChild(Date.now, process.execPath)({ args: [script], prompt: 'x', cwd: dir, timeoutMs: 60_000 });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(result).toMatchObject({ ok: true, code: null });
+    expect(result.ok && result.lines).toHaveLength(1);
+  }, 40_000);
+
+  it('does not throw for a command that cannot be started', async () => {
+    const result = await spawnChild(Date.now, 'definitely-not-a-real-command-xyz')({ args: [], prompt: '', cwd: tmpdir(), timeoutMs: 10_000 });
+    expect(result.ok === false || result.code !== 0).toBe(true);
+  });
+});
 
 describe('stub', () => {
   const make = () => {
@@ -510,7 +542,15 @@ describe('runPoint', () => {
     expect(await reasonOf({ ok: false, reason: 'timeout' })).toMatchObject({ class: 'failed', reason: 'timeout' });
     expect(await reasonOf(ok(stream({ result: false }), 1))).toMatchObject({ class: 'failed', reason: 'exit 1' });
     expect(await reasonOf(ok(stream({ result: false }), 0))).toMatchObject({ class: 'failed', reason: 'no result' });
-    expect(await reasonOf(ok(stream({ init: { mcp_servers: [] } })))).toMatchObject({ class: 'failed', reason: 'stub not connected' });
+    expect(await reasonOf(ok(stream({ init: { mcp_servers: [] } })))).toMatchObject({ class: 'failed', reason: 'stub not connected (not listed)' });
+    expect(await reasonOf(ok(stream({ init: { mcp_servers: [{ name: 'stub', status: 'failed' }] } })))).toMatchObject({
+      class: 'failed',
+      reason: 'stub not connected (failed)',
+    });
+    expect(await reasonOf(ok(stream({ init: { mcp_servers: [{ name: 'stub', status: 'pending' }] } })))).toMatchObject({
+      class: 'failed',
+      reason: 'stub still pending at start',
+    });
     expect(await reasonOf(ok(stream({ isError: true })))).toMatchObject({ class: 'failed', reason: 'error result' });
     expect(await reasonOf(ok(stream({ init: { mcp_servers: [{ name: 'stub', status: 'connected' }], tools: ['Bash'] } })))).toMatchObject({
       class: 'failed',
@@ -518,6 +558,13 @@ describe('runPoint', () => {
     });
     const compacted = [...stream({ calls: [edit(VALUE)] }), event({ type: 'system', subtype: 'compact_boundary' }, 5000)];
     expect(await reasonOf(ok(compacted))).toMatchObject({ class: 'failed', reason: 'auto-compacted' });
+  });
+
+  it('classifies a child that began with the stub pending but then used it', async () => {
+    const { point, context } = setup(reachableSession());
+    const pending = { mcp_servers: [{ name: 'stub', status: 'pending' }] };
+    const lines = stream({ init: pending, calls: [edit(VALUE)] });
+    expect((await runPoint(point, context, 'p', deps(scripted([ok(lines)]).runner))).class).toBe('same');
   });
 
   it('marks an outcome without reported usage as unmetered, but still classifies it', async () => {

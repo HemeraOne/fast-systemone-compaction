@@ -68,10 +68,20 @@ export interface StreamCall {
   at: number;
 }
 
+/** What the init event said about the stub; a fixed vocabulary, so it is safe to print. */
+export type StubStatus = 'connected' | 'pending' | 'failed' | 'needs-auth' | 'disabled' | 'not listed' | 'unknown';
+
+const KNOWN_STATUSES: readonly string[] = ['connected', 'pending', 'failed', 'needs-auth', 'disabled'];
+
+/** A definitive "no": `pending` may still connect before the first turn, so it is not one. */
+export function stubFailed(status: StubStatus | undefined): boolean {
+  return status !== undefined && status !== 'connected' && status !== 'pending';
+}
+
 export interface ParsedStream {
   calls: StreamCall[];
-  /** Whether the init event listed the stub as connected; `undefined` when it listed no servers. */
-  stubConnected: boolean | undefined;
+  /** The stub's status in the init event; `undefined` when the event listed no servers array. */
+  stubStatus: StubStatus | undefined;
   /** Whether the init event offered any stub tool; `undefined` when it listed no tools. */
   toolsOffered: boolean | undefined;
   /** The child compacted its own conversation, so the history it saw is not the one we sent. */
@@ -93,7 +103,7 @@ const count = (value: unknown): number => (typeof value === 'number' && Number.i
 export function parseStream(lines: readonly StreamLine[]): ParsedStream {
   const parsed: ParsedStream = {
     calls: [],
-    stubConnected: undefined,
+    stubStatus: undefined,
     toolsOffered: undefined,
     compacted: false,
     tokens: undefined,
@@ -113,9 +123,10 @@ export function parseStream(lines: readonly StreamLine[]): ParsedStream {
 
     if (event['type'] === 'system' && event['subtype'] === 'init') {
       if (Array.isArray(event['mcp_servers'])) {
-        parsed.stubConnected = event['mcp_servers'].some(
-          (server) => isRecord(server) && server['name'] === SERVER && server['status'] === 'connected',
-        );
+        const server = event['mcp_servers'].find((entry) => isRecord(entry) && entry['name'] === SERVER);
+        const status = isRecord(server) ? server['status'] : undefined;
+        parsed.stubStatus =
+          server === undefined ? 'not listed' : typeof status === 'string' && KNOWN_STATUSES.includes(status) ? (status as StubStatus) : 'unknown';
       }
       if (Array.isArray(event['tools'])) {
         parsed.toolsOffered = event['tools'].some((name) => typeof name === 'string' && name.startsWith(PREFIX));
@@ -173,14 +184,25 @@ export function quoteArg(arg: string): string {
   return arg === '' || /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
 }
 
-/** Runs the real `claude` CLI as a child process. */
-export function spawnChild(now: () => number): ChildRunner {
+/** Kills the child and, on Windows, everything it started (`claude.cmd` runs through a shell). */
+function stop(child: ReturnType<typeof spawn>): void {
+  if (WINDOWS && child.pid !== undefined) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+  else child.kill();
+}
+
+/**
+ * Runs the real `claude` CLI as a child process. A child whose init event says the stub is
+ * definitively unavailable is killed at once: it would otherwise spend a whole turn on the
+ * flattened history for a result that cannot be used.
+ */
+export function spawnChild(now: () => number, command = 'claude'): ChildRunner {
   return (request) =>
     new Promise((resolve) => {
       let settled = false;
       const lines: StreamLine[] = [];
       let buffer = '';
       let timer: NodeJS.Timeout | undefined;
+      let halted: ChildResult | undefined;
       const finish = (result: ChildResult): void => {
         if (settled) return;
         settled = true;
@@ -191,11 +213,26 @@ export function spawnChild(now: () => number): ChildRunner {
         const parts = buffer.split('\n');
         buffer = final ? '' : (parts.pop() ?? '');
         for (const text of parts) if (text.trim() !== '') lines.push({ text, at: now() });
+        if (halted === undefined && stubFailed(parseStream(lines).stubStatus)) {
+          halt({ ok: true, lines, code: null });
+        }
+      };
+      /**
+       * Kills the child, then answers once it has really closed, so the stub is gone before the
+       * scratch directory is removed; the fallback keeps a child that will not die from
+       * blocking the run.
+       */
+      const halt = (result: ChildResult): void => {
+        if (halted !== undefined) return;
+        halted = result;
+        if (timer !== undefined) clearTimeout(timer);
+        timer = setTimeout(() => finish(result), 5000);
+        stop(child);
       };
 
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn('claude', WINDOWS ? request.args.map(quoteArg) : request.args, {
+        child = spawn(WINDOWS ? quoteArg(command) : command, WINDOWS ? request.args.map(quoteArg) : request.args, {
           cwd: request.cwd,
           shell: WINDOWS,
           stdio: ['pipe', 'pipe', 'ignore'],
@@ -205,11 +242,7 @@ export function spawnChild(now: () => number): ChildRunner {
         finish({ ok: false, reason: 'cannot start claude' });
         return;
       }
-      timer = setTimeout(() => {
-        if (WINDOWS && child.pid !== undefined) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-        else child.kill();
-        finish({ ok: false, reason: 'timeout' });
-      }, request.timeoutMs);
+      timer = setTimeout(() => halt({ ok: false, reason: 'timeout' }), request.timeoutMs);
       child.on('error', () => finish({ ok: false, reason: 'cannot start claude' }));
       child.stdout?.setEncoding('utf8');
       child.stdout?.on('data', (chunk: string) => {
@@ -218,7 +251,7 @@ export function spawnChild(now: () => number): ChildRunner {
       });
       child.on('close', (code) => {
         take(true);
-        finish({ ok: true, lines, code });
+        finish(halted ?? { ok: true, lines, code });
       });
       child.stdin?.on('error', () => undefined);
       child.stdin?.end(request.prompt);
