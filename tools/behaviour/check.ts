@@ -1,5 +1,7 @@
 import { parseTranscript } from '../replay/transcript.js';
 import { pointContext } from './history.js';
+import { parseStream } from './model.js';
+import type { ChildResult } from './model.js';
 import { runPoint } from './session.js';
 import type { SessionDeps } from './session.js';
 import type { LostPoint } from './select.js';
@@ -25,11 +27,25 @@ const PROMPT =
   'then reply with the single word: done';
 
 /**
+ * What the child itself reported, shown only on a problem. This is safe to print here and
+ * nowhere else: the prompt of a check is synthetic, so the text cannot hold session content.
+ */
+function childSaid(child: ChildResult | undefined): string[] {
+  if (child === undefined || !child.ok) return [];
+  const stream = parseStream(child.lines);
+  if (!stream.sawResult) return [`Child exited with code ${child.code ?? 'none'} and printed no result`];
+  const text = stream.resultText.replace(/\s+/g, ' ').trim().slice(0, 300);
+  return [`Child result (${stream.resultSubtype || 'no subtype'}): ${text === '' ? '(no text)' : text}`];
+}
+
+/**
  * Runs one tiny synthetic prompt through the same child, isolation and stub as a real run and
  * reports whether the model could use a stub tool. It sends no session text and costs a few
  * thousand tokens, so a wrong CLI assumption shows up here instead of in a 250k-token point.
  */
-export async function runCheck(session: SessionDeps): Promise<CheckResult> {
+export async function runCheck(base: SessionDeps): Promise<CheckResult> {
+  let last: ChildResult | undefined;
+  const session: SessionDeps = { ...base, runner: async (request) => (last = await base.runner(request)) };
   const path = session.scratch.file('check.jsonl', SESSION);
   const { messages } = parseTranscript(SESSION);
   const point: LostPoint = { session: 'check.jsonl', path, messageIndex: 3, toolUseId: 'e1', tool: 'Edit', losses: [], messages };
@@ -47,6 +63,7 @@ export async function runCheck(session: SessionDeps): Promise<CheckResult> {
     `Result: ${problem === undefined ? 'OK, the model called a stub tool and the stub answered' : `PROBLEM, ${problem}`}`,
     `Stub tool calls seen: ${outcome.lookups}`,
     `Tokens used: ${outcome.tokens}${outcome.unmetered ? ' (usage not reported)' : ''}`,
+    ...(problem === undefined ? [] : childSaid(last)),
   ];
   return { code: problem === undefined ? 0 : 1, output: lines.join('\n') };
 }
