@@ -1,6 +1,6 @@
 import { familyOf, matchesRecorded } from './history.js';
 import type { PointContext } from './history.js';
-import { buildArgs, CHILD_TIMEOUT_MS, parseStream } from './model.js';
+import { buildArgs, CHILD_TIMEOUT_MS, parseStream, stubFailed } from './model.js';
 import type { ChildRunner, Scratch } from './model.js';
 import type { LostPoint } from './select.js';
 import { MAX_LOOKUPS } from './stub.js';
@@ -66,8 +66,8 @@ export async function runPoint(
   });
   const failed = (reason: string): Outcome => ({ ...outcome('failed', 0, lastAt), reason });
 
-  if (stream.stubConnected === false) return failed('stub not connected');
-  if (stream.toolsOffered === false) return failed('stub tools not offered');
+  if (stubFailed(stream.stubStatus)) return failed(`stub not connected (${stream.stubStatus})`);
+  if (stream.stubStatus === 'connected' && stream.toolsOffered === false) return failed('stub tools not offered');
   if (stream.compacted) return failed('auto-compacted');
 
   let lookups = 0;
@@ -81,6 +81,8 @@ export async function runPoint(
   }
   if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
   if (stream.isError) return failed('error result');
+  // A stub that was still starting when the child began may never have been offered to the model.
+  if (stream.stubStatus === 'pending' && stream.calls.length === 0) return failed('stub still pending at start');
   return outcome('gave-up', lookups, lastAt);
 }
 
