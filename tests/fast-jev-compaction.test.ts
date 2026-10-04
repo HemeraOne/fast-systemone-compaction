@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyDecisions,
   batchCalls,
+  backendMarker,
   buildJevRequest,
   collectToolCalls,
   compact,
@@ -12,6 +13,7 @@ import {
   JevClient,
   parseJevResponse,
   reductionRatio,
+  resolveBaseUrl,
   resolveOptions,
   type HistoryToolCall,
   type JevAsker,
@@ -293,12 +295,11 @@ describe('decisions', () => {
     ]);
     expect(kept[0]).toBe(messages[0]);
     expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    const head150Tail150 = new RegExp(
+      `^x{150}\\n\\[fast-systemone-compaction truncated 1700 chars[^\\]]*\\]\\nx{150}$`,
     );
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(
-      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
-    );
+    expect(kept[2]?.toolUses[0]?.text).toMatch(head150Tail150);
+    expect(kept[3]?.toolResults?.[0]?.text).toMatch(head150Tail150);
     expect(kept[2]).not.toBe(messages[4]);
     expect(kept[3]).not.toBe(messages[5]);
     expect(kept[4]).toBe(messages[6]);
@@ -312,7 +313,7 @@ describe('decisions', () => {
     expect(shortKept[3]).toBe(shortMessages[5]);
   });
 
-  it('honours truncateHeadChars, including a zero head', () => {
+  it('splits truncateHeadChars between the start and the end, including a zero budget', () => {
     const messages = transcript();
     const calls = collectToolCalls(messages, 0);
     const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
@@ -321,14 +322,30 @@ describe('decisions', () => {
 
     const kept = applyDecisions(messages, decisions, calls, 50);
     expect(kept[2]?.toolResults?.[0]?.text).toBe(
-      `${original.slice(0, 50)}\n[fast-jev-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
+      `${original.slice(0, 25)}\n[fast-systemone-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]\n${original.slice(total - 25)}`,
     );
     expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
 
     const noHead = applyDecisions(messages, decisions, calls, 0);
     expect(noHead[2]?.toolResults?.[0]?.text).toBe(
-      `[fast-jev-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
+      `[fast-systemone-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
     );
+  });
+
+  it('does not leave half a surrogate pair at the cut', () => {
+    const messages = transcript();
+    // Each emoji is two code units; a 25-unit head and a 25-unit tail would split both.
+    const text = `${'a'.repeat(24)}\u{1F600}${'b'.repeat(500)}\u{1F600}${'c'.repeat(24)}`;
+    messages[2]!.toolResults![0]!.text = text;
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
+
+    const kept = applyDecisions(messages, decisions, calls, 50);
+    const out = kept[2]!.toolResults![0]!.text;
+    expect(out).toBe(
+      `${'a'.repeat(24)}\n[fast-systemone-compaction truncated ${text.length - 48} chars of this tool result; re-run the tool if needed]\n${'c'.repeat(24)}`,
+    );
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 });
 
@@ -429,5 +446,37 @@ describe('HTTP client', () => {
     await expect(
       compactMessages(transcript(), { apiKey: '', preserveRecentMessages: 1 }),
     ).rejects.toThrow(/TYPESAFE_API_KEY/);
+  });
+
+  it('resolves baseUrl: unset/empty stays unset, valid http(s) passes through, anything else is rejected', () => {
+    expect(resolveBaseUrl(undefined)).toEqual({});
+    expect(resolveBaseUrl('')).toEqual({});
+    expect(resolveBaseUrl('   ')).toEqual({});
+    expect(resolveBaseUrl('http://127.0.0.1:8000/v1/systemone')).toEqual({
+      baseUrl: 'http://127.0.0.1:8000/v1/systemone',
+    });
+    expect(resolveBaseUrl('https://laya.example.com/v1/systemone?x=1')).toEqual({
+      baseUrl: 'https://laya.example.com/v1/systemone?x=1',
+    });
+    expect(resolveBaseUrl('https://laya.example.com/v1/systemone/')).toEqual({
+      baseUrl: 'https://laya.example.com/v1/systemone/',
+    });
+    expect(resolveBaseUrl('localhost:8000/v1/systemone')).toEqual({
+      invalidBaseUrl: 'localhost:8000/v1/systemone',
+    });
+    expect(resolveBaseUrl('ftp://127.0.0.1:8000')).toEqual({ invalidBaseUrl: 'ftp://127.0.0.1:8000' });
+    expect(resolveBaseUrl('not a url')).toEqual({ invalidBaseUrl: 'not a url' });
+  });
+
+  it('formats a backend marker from a URL, or the raw value when it is not one', () => {
+    expect(backendMarker('https://api.typesafe.ai/v1/systemone', 'jev-latest')).toBe(
+      'api.typesafe.ai jev-latest',
+    );
+    expect(backendMarker('http://127.0.0.1:8000/v1/systemone', 'typed-decisions')).toBe(
+      '127.0.0.1:8000 typed-decisions',
+    );
+    expect(backendMarker('localhost:8000/v1/systemone', 'jev-latest')).toBe(
+      'localhost:8000/v1/systemone jev-latest',
+    );
   });
 });

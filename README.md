@@ -1,9 +1,10 @@
-# fast-jev-compaction
+# fast-systemone-compaction
 
-Claude Code plugin that replaces the compaction summary with Jev decisions:
-every tool call and result is scored in one fast request, stale ones are
-dropped or truncated, everything kept stays verbatim. Also usable as an npm
-library.
+Claude Code plugin that replaces the compaction summary with verbatim pruning:
+a System One (Jev) model scores every tool call and result in one fast request,
+or fixed rules shorten large old results and drop superseded file reads with no
+model at all. Stale items are dropped or truncated, everything kept stays
+verbatim. Also usable as an npm library.
 
 ## What and why
 
@@ -46,8 +47,9 @@ built-in compaction summary with the original messages.
    concurrently and their answers are merged.
 6. Decisions per call, against `keepThreshold`:
    - `keepResult ≥ threshold` → keep call and result;
-   - else `keepCall ≥ threshold` → keep the call, truncate the result to its
-     first `truncateHeadChars` characters plus a one-line note;
+   - else `keepCall ≥ threshold` → keep the call, truncate the result to
+     `truncateHeadChars` characters (half from its start, half from its end)
+     with a one-line note between them;
    - else → remove the call together with its result.
 7. The message list is rebuilt: a message that loses all its content is
    removed, untouched messages are returned as the same objects, and no result
@@ -59,12 +61,12 @@ fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
 ## Install and usage
 
 ```sh
-npm install fast-jev-compaction
+npm install fast-systemone-compaction
 export TYPESAFE_API_KEY=...
 ```
 
 ```ts
-import { compactMessages, reductionRatio, type Message } from 'fast-jev-compaction';
+import { compactMessages, reductionRatio, type Message } from 'fast-systemone-compaction';
 
 const transcript: Message[] = [
   { role: 'user', text: 'Fix the failing test. Never edit src/generated.', toolUses: [] },
@@ -109,7 +111,7 @@ put it in a source file.
 | `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
-| `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `truncateHeadChars` | `300` | Characters of a dropped tool result retained, split between its start and end around the note |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -146,15 +148,15 @@ Then add this repository as a plugin marketplace and install the plugin,
 either from the shell or as slash commands inside a session:
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
-claude plugin install fast-jev-compaction@fast-jev-compaction
+claude plugin marketplace add considerITman/fast-systemone-compaction
+claude plugin install fast-systemone-compaction@fast-systemone-compaction
 ```
 
 The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
 …); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
 Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
 auto-compaction) goes through Jev: the toast reads
-`fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
+`fast-systemone-compaction: kept N/M messages, no summary (…)` when the pruned history
 replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
 could not remove enough (short sessions, or when it fails).
 
@@ -162,11 +164,40 @@ To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 
 from the repository root. No publishing step is required; the marketplace is
 just the repo's `.claude-plugin/marketplace.json`.
 
+### Rule-based mode (no model, no network)
+
+Set the `compactionMode` plugin option to `rules` to compact without any
+backend: large old tool results (over 2,000 characters) are cut to a head and a
+tail around a note (except reads of a file that a later edit or write follows,
+which are kept whole), and file reads that a later full read or write of the
+same file supersedes are removed (a partial read only when a later full read
+exists).
+No key or endpoint is needed and no request is made. Unset keeps the System
+One mode; an unknown value falls back to the built-in summary. The rule set
+is validated for size and for lost information (see Safety replay below), not
+for effect on later answers, and is the baseline a model-based mode must beat.
+The library function is `compactByRules(messages, options)`. Details, including the deferred
+failed-command rule, are in [`hooks/README.md`](hooks/README.md#rule-based-mode-no-model-no-network).
+
+### Self-hosted / local Laya
+
+Set the `baseUrl` plugin option to point compaction requests at any
+Jev-compatible endpoint instead of TypeSafe, e.g. a local Laya server at
+`http://127.0.0.1:8000/v1/systemone` with `model=typed-decisions`,
+`apiKey=local`, and small budgets (`maxStateTokens=650`,
+`maxRequestTokens=950` — Laya's first model has a 1,024-token context).
+Leaving `baseUrl` unset keeps the existing TypeSafe behaviour. The Laya setup
+is experimental: with its current small model most sessions fall back to the
+built-in summary. See
+[`hooks/README.md`](hooks/README.md#self-hosted--local-laya) for the start
+command, the full request/response contract, and what to expect from a small
+local model.
+
 ## Development
 
 ```sh
 npm install
-npm run typecheck        # library + hook
+npm run typecheck        # library + hook + tools
 npm test
 npm run build
 npm run validate:plugin  # claude plugin validate
@@ -175,6 +206,18 @@ TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
 
 The unit tests use a fake Jev and never contact TypeSafe. The demo is the live
 network check.
+
+### Safety replay
+
+`npm run replay` checks the rule-based mode against your own past Claude Code
+sessions (default `~/.claude/projects`, or `-- --root <dir>`). At points in each
+session it compacts the history before a tool call with `compactByRules` and
+counts how often a value that call used (a file path, a command, the text an
+edit targets) occurred earlier but is gone after compaction, per rule. It runs
+offline with no model or key, prints counts, rates, and locators but never
+transcript text, and gives the same report on every run. A lost value is an
+upper bound on harm, not proof of it. The code lives in `tools/replay/` and is
+not part of the plugin or the published package.
 
 ## Animated demo (macOS)
 

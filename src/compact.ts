@@ -132,12 +132,27 @@ async function askBatch(
   );
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+/**
+ * Keeps `keepChars` of a long result, split between its start and its end (the
+ * end usually holds the summary or final error), and notes what was cut.
+ */
+function truncatedResultText(text: string, isError: boolean, keepChars: number): string {
+  if (text.length <= keepChars + 120) return text;
+  let headEnd = Math.ceil(keepChars / 2);
+  let tailStart = text.length - Math.floor(keepChars / 2);
+  if (headEnd > 0) {
+    const last = text.charCodeAt(headEnd - 1);
+    if (last >= 0xd800 && last <= 0xdbff) headEnd -= 1;
+  }
+  if (tailStart < text.length) {
+    const first = text.charCodeAt(tailStart);
+    if (first >= 0xdc00 && first <= 0xdfff) tailStart += 1;
+  }
+  const head = headEnd > 0 ? `${text.slice(0, headEnd)}\n` : '';
+  const tail = tailStart < text.length ? `\n${text.slice(tailStart)}` : '';
+  return `${head}[fast-systemone-compaction truncated ${tailStart - headEnd} chars of this tool result${
     isError ? ' (error)' : ''
-  }; re-run the tool if needed]`;
+  }; re-run the tool if needed]${tail}`;
 }
 
 /**

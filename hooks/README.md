@@ -1,17 +1,18 @@
-# fast-jev-compaction Claude Code mod
+# fast-systemone-compaction Claude Code mod
 
 This plugin uses Claude Code function hooks to replace a compaction with the
 original messages, minus the tool calls and tool results Jev judged no longer
 needed. `hooks/fast-jev.ts` is a thin adapter: it reads the plugin options,
 finds the TypeSafe key, hands `session.compact` transcripts to the
-`fast-jev-compaction` library in `src/` (the plugin folder is the repository
+`fast-systemone-compaction` library in `src/` (the plugin folder is the repository
 root, so the hook imports it directly) and maps the result back onto session
 messages. User and assistant text is never touched. Jev is sent the whole
 conversation as `state` (tool outputs replaced by a one-line note) and, for
 every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
 item is kept when Jev's probability reaches `keepThreshold`; a dropped result
-is truncated to its first `truncateHeadChars` characters plus a one-line note,
+is truncated to `truncateHeadChars` characters (half from its start, half from
+its end) with a one-line note between them,
 and a dropped call disappears with its result.
 
 The state is fitted into `maxStateTokens` in stages: tool inputs are
@@ -31,8 +32,8 @@ hooks surface before installing or loading it:
 export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
 export TYPESAFE_API_KEY="<your TypeSafe key>"
 
-claude plugin marketplace add tamaratran/fast-jev-compaction
-claude plugin install fast-jev-compaction@fast-jev-compaction
+claude plugin marketplace add considerITman/fast-systemone-compaction
+claude plugin install fast-systemone-compaction@fast-systemone-compaction
 ```
 
 For local development:
@@ -48,6 +49,8 @@ The plugin declares these `userConfig` values in
 
 | Option | Default |
 | --- | ---: |
+| `compactionMode` | *(unset → `backend`)* |
+| `baseUrl` | *(unset → TypeSafe)* |
 | `keepThreshold` | `0.5` |
 | `preserveRecentMessages` | `6` |
 | `compactAtPercent` | `60` |
@@ -57,9 +60,26 @@ The plugin declares these `userConfig` values in
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
 
-The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
+The System One key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
-development setup.
+development setup. The key is resolved in this order: the `apiKey` option, the
+`TYPESAFE_API_KEY` environment variable, then `env.TYPESAFE_API_KEY` in
+`settings.json`. If the hook does not see the shell environment (for example
+when Claude Code is started from a launcher that does not inherit it), put the
+key under `env` in `settings.json` instead.
+
+`baseUrl` points compaction requests at any Jev-compatible System One
+endpoint instead of TypeSafe — see "Self-hosted / local Laya" below. Leave it
+unset, empty, or whitespace to keep using TypeSafe; this is the default and
+existing behaviour, unchanged by setting nothing. A non-empty value that is
+not an absolute `http://` or `https://` URL (e.g. a missing scheme or a typo)
+is rejected: no request is sent anywhere, the compaction falls back to the
+built-in summary, the toast/log names the rejected value as invalid, and the
+same notice is logged once more at the first handled event so it is not
+missed. Every compaction outcome line (applied, below-minimum fallback, or
+error fallback) is tagged with the backend host and model that produced it,
+so TypeSafe and self-hosted results are never ambiguous — when a `baseUrl`
+was rejected, the tag shows the rejected raw value instead of a host.
 
 Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
 `model` is passed straight to the library; see the root README for what they
@@ -73,6 +93,136 @@ reduction, per-reason counts, state size and request count; a per-call
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard.
+
+## Rule-based mode (no model, no network)
+
+Set `compactionMode` to `rules` to compact with two fixed rules instead of
+asking a System One endpoint. Nothing leaves the machine, no key or endpoint
+is needed (none is looked up or reported as missing), and the same input
+always gives the same output. Unset, empty, or `backend` keeps the System One
+mode exactly as described above. Any other value (a typo such as `rulez`) is
+rejected: no request is sent anywhere, the compaction falls back to the
+built-in summary, and the toast says `invalid compactionMode: <value> (use
+backend or rules)`.
+
+The rules apply only outside the protected messages (the first and the newest
+`preserveRecentMessages`), and never rewrite user or assistant text:
+
+1. **Large old results are shortened.** A tool result longer than 2,000
+   characters (or `truncateHeadChars` + 120 when that is larger) keeps
+   `truncateHeadChars` characters (half from its start, half from its end)
+   with the usual one-line note between them; the call stays. The result of a
+   `Read` is kept whole when a later successful `Edit`, `MultiEdit`, or `Write`
+   of the same file is in the history: its text is the likely source of the next
+   edit.
+2. **Superseded reads are removed**, call and result together. A full-file
+   `Read` goes when a later successful full `Read` or `Write` of the same
+   `file_path` exists. A partial `Read` (with `offset` or `limit`) goes only
+   when a later successful full `Read` of that path exists, so content no other
+   read covers is kept. An `Edit` or a partial `Read` supersedes nothing: it
+   changes or shows only part of the file. A failed later call supersedes
+   nothing, and the latest touch of a path is always kept. Paths compare after
+   turning `\` into `/`; a read without a string `file_path` is kept.
+
+Deferred, not implemented: dropping a failed shell command that a later run
+repeated successfully. It never fired in the measurement, so it has not earned
+its complexity.
+
+`apiKey`, `baseUrl`, `model`, `keepThreshold`, `maxStateTokens` and
+`maxRequestTokens` are ignored in this mode; `preserveRecentMessages`,
+`truncateHeadChars`, and `minReductionRatio` apply. Below the minimum reduction
+the hook falls back to the built-in summary as usual. Outcome lines end in
+`[rules]` and report the counts:
+
+```text
+kept 40/62 messages, no summary (57% reduction; 9 results shortened, 6 reads removed) [rules]
+```
+
+**What is and is not validated.** Size: on a local corpus of about 370 sessions
+a path-only version of the rules removed roughly half of the characters at the
+median. Information loss: a local replay (`npm run replay`, see the root
+README) measures how many of the values the assistant's next tool call used
+(file paths, commands, edit-target text) are gone after compaction. On 258
+local sessions the first rule set lost 3.9% of those values and 14.8% of edit
+targets (28 of 189), split evenly between the two rules; with the current rules
+(reads of later-edited files kept whole, edits no longer removing reads) it loses
+2.1% and 7.4% of edit targets (13 of 175), at a median size reduction of 36.3%
+(46.9% before) with 82.0% of sessions reaching the 25% minimum (91.0% before).
+Sessions that no longer reach it fall back to the built-in summary. Whether
+the remaining loss degrades later assistant behaviour has not been tested; a
+lost value is an upper bound on harm, not proof of it. Treat the rules as the
+baseline a model-based mode has to beat, not as a proven-safe replacement for it.
+
+## Self-hosted / local Laya
+
+Any HTTP service that implements the System One request/response contract
+below can be used instead of TypeSafe — for example a local Laya server
+speaking its first model, `typed-decisions`.
+
+> **Experimental — a contract test, not a practical backend yet.** Measured on
+> a CPU-only laptop: Laya's first model has a 1,024-token context (so most real
+> sessions end in "history too large"), a request takes roughly 20 s for a
+> ~650-token state and grows with both state size and question count, and
+> Claude Code caps each `$.http.fetch` at 30 s (not configurable), so slow
+> requests end in a timeout fallback. Its scores for the plugin's "keep this
+> call / result?" questions also sat near 0.5 for both obviously-droppable and
+> obviously-needed items in a small hand check, so even a completed request
+> may drop nothing. Use it to verify the wiring; expect TypeSafe, or a future
+> larger and better-suited model, for real compaction. To try it:
+
+```sh
+pip install "laya[serve]"
+LAYA_HOST=127.0.0.1 LAYA_MODELS=typed-decisions LAYA_API_KEY=local laya-serve   # listens on :8000
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
+```
+
+`laya-serve` is configured through `LAYA_*` environment variables (`LAYA_HOST`,
+`LAYA_PORT`, `LAYA_MODELS`, `LAYA_API_KEY`, `LAYA_DEVICE`); it binds `0.0.0.0` by
+default, so set `LAYA_HOST=127.0.0.1` for local use. `LAYA_MODELS=typed-decisions`
+preloads only that checkpoint. On a managed Windows machine where the
+`laya-serve.exe` launcher is blocked, run
+`python -c "from laya.serve import main; main()"` instead.
+
+Set these plugin options:
+
+| Option | Value |
+| --- | --- |
+| `baseUrl` | `http://127.0.0.1:8000/v1/systemone` |
+| `model` | `typed-decisions` |
+| `apiKey` | `local` |
+| `maxStateTokens` | `650` |
+| `maxRequestTokens` | `950` |
+
+The small budgets are required, not optional: Laya's first `typed-decisions`
+model has a 1,024-token context, so the plugin's normal defaults
+(`maxStateTokens=25000`, `maxRequestTokens=30000`) would have every request
+rejected outright. Even with `650`/`950`, expect many real sessions to fall
+back with a "history too large" message — that means the transcript still
+does not fit this small a model, not that the plugin is misconfigured; a
+larger-context model is the only fix, tuning the compaction algorithm itself
+for small contexts is a separate concern. A successful compaction, a
+"history too large" fallback, and a backend-error fallback (non-2xx status)
+are all expected outcomes when experimenting with a small local model — the
+toast and log for each names which one happened, tagged with the backend
+host and model.
+
+### Request/response contract
+
+Any endpoint configured via `baseUrl` (TypeSafe or self-hosted) must satisfy:
+
+```
+POST <baseUrl>
+authorization: Bearer <apiKey>
+content-type: application/json
+
+{ "model": "<model>", "state": <JevState>, "questions": { "<name>": { "type": "noul", "instructions": "<text>" }, ... } }
+```
+
+A 2xx response with a JSON body `{ "answers": { "<name>": { "noul": <0..1> }, ... } }`
+for every question asked is treated as success. Any other status, a body
+that isn't valid JSON, or JSON missing/malforming `answers` is treated as
+failure: the hook falls back to the built-in summary and names the failure
+(status code or "malformed") in the outcome line.
 
 ## Scope and caveat
 

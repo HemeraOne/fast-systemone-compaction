@@ -1,14 +1,24 @@
 {
-  "name": "fast-jev-compaction",
-  "version": "0.3.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "name": "fast-systemone-compaction",
+  "version": "0.5.1",
+  "description": "Verbatim context compaction for Claude Code sessions, guided by a System One model or fixed rules.",
   "license": "MIT",
   "userConfig": {
+    "compactionMode": {
+      "type": "string",
+      "title": "Compaction mode",
+      "description": "backend (default): ask the configured System One endpoint which tool calls and results to keep. rules: no model and no network; shorten large old tool results and drop superseded file reads."
+    },
     "apiKey": {
       "type": "string",
-      "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "title": "System One API key",
+      "description": "System One API key. Leave unset to use TYPESAFE_API_KEY, or the TypeSafe key when baseUrl is unset.",
       "sensitive": true
+    },
+    "baseUrl": {
+      "type": "string",
+      "title": "System One endpoint",
+      "description": "System One endpoint to POST to. Leave unset to use the TypeSafe endpoint (https://api.typesafe.ai/v1/systemone)."
     },
     "keepThreshold": {
       "type": "number",
@@ -54,8 +64,8 @@
     },
     "model": {
       "type": "string",
-      "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
+      "title": "System One model",
+      "description": "Model name sent to the configured System One endpoint. Defaults to TypeSafe's jev-latest.",
       "default": "jev-latest"
     }
   }

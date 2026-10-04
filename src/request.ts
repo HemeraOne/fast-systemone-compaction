@@ -35,6 +35,32 @@ export function buildJevRequest(
   };
 }
 
+/** Validates a raw `baseUrl` option: unset/empty means "use the default", anything
+ * else must be an absolute http(s) URL or it is rejected (never silently defaulted). */
+export function resolveBaseUrl(raw: string | undefined): { baseUrl?: string; invalidBaseUrl?: string } {
+  const trimmed = raw?.trim();
+  if (!trimmed) return {};
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === 'http:' || url.protocol === 'https:') return { baseUrl: trimmed };
+  } catch {
+    // falls through to invalid
+  }
+  return { invalidBaseUrl: trimmed };
+}
+
+/** `<host> <model>` for outcome logging; falls back to the raw input if it isn't a URL. */
+export function backendMarker(urlOrRaw: string, model: string): string {
+  let host = urlOrRaw;
+  try {
+    const url = new URL(urlOrRaw);
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && url.host) host = url.host;
+  } catch {
+    // not a URL (e.g. a rejected invalid baseUrl) — use the raw value as-is
+  }
+  return `${host} ${model}`;
+}
+
 /** Validates a Jev response body; throws on anything but an `answers` object. */
 export function parseJevResponse(
   status: number,
