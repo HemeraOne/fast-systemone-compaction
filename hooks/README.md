@@ -150,8 +150,15 @@ With the current rules (reads of later-edited files kept whole, edits no longer
 removing reads), re-measured on the corpus of 2026-10-04 (217 sessions), it
 loses 2.4% of values and 7.9% of edit targets (11 of 139), at a median size
 reduction of 35.3% with 77.3% of sessions reaching the minimum; all 13 lost
-values come from the large-result rule. The two corpora differ, so the first
-figures are not a like-for-like baseline. Seven of the 11 lost edit targets
+values come from the large-result rule. Re-measured again on 2026-10-04 on
+the then-current corpus (219 sessions), it loses 2.8% of values (15 of 534)
+and 9.2% of edit targets (13 of 142), at a median of 35.1% with 76.4% of
+sessions reaching the minimum; all 15 lost values again come from the
+large-result rule. The corpus changes as old transcripts are deleted (about 40
+of the 258 are gone and could not be recovered), so the figures are not
+like-for-like and the 258-session corpus cannot be re-run; on today's corpus
+the edit-target (8%) and session-share (80%) targets are not met. In the
+2026-10-04 (217-session) run, seven of the 11 lost edit targets
 are in a read of the file that the assistant edits next, for the first time:
 the rules cannot know an edit is coming, and keeping every read whole would
 cut the share of sessions reaching the minimum to 29%.
