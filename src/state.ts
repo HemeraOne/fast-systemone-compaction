@@ -55,9 +55,17 @@ export function isPinned(
   return index === 0 || index >= total - preserveRecentMessages;
 }
 
+function idCounts(ids: Iterable<string>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return counts;
+}
+
 /**
  * Pairs every tool_use with its tool_result by `tool_use_id`. Calls without a
- * result are not candidates (there is nothing to drop yet).
+ * result are not candidates (there is nothing to drop yet), and neither are
+ * calls whose id appears more than once: the pairing is ambiguous, and a
+ * decision keyed by the id would also hit the other call.
  */
 export function collectToolCalls(
   messages: readonly Message[],
@@ -69,11 +77,16 @@ export function collectToolCalls(
       results.set(result.tool_use_id, { index, result });
     }
   });
+  const useCounts = idCounts(messages.flatMap((m) => m.toolUses.map((tool) => tool.tool_use_id)));
+  const resultCounts = idCounts(
+    messages.flatMap((m) => (m.toolResults ?? []).map((result) => result.tool_use_id)),
+  );
   const calls: ToolCall[] = [];
   messages.forEach((message, callIndex) => {
     for (const tool of message.toolUses) {
       const found = results.get(tool.tool_use_id);
       if (!found) continue;
+      if (useCounts.get(tool.tool_use_id)! > 1 || resultCounts.get(tool.tool_use_id)! > 1) continue;
       calls.push({
         id: `t${calls.length + 1}`,
         tool_use_id: tool.tool_use_id,
