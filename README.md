@@ -247,8 +247,9 @@ replace Claude Code's own, lookups match only exact repeats (a `Read` matches on
 path), the point count is small, and the CLI details the tool relies on are
 checked only against the real CLI: `-- --check --model <id>` runs one tiny
 synthetic prompt (a few thousand tokens, no session text) through the same child
-and stub and says whether the model could use a stub tool, so run it before a
-real point, which costs about 250k tokens per arm. The code lives in `tools/behaviour/`, not in the plugin or the
+and stub and says whether the model could use a stub tool (on a problem it also
+prints what the child itself reported, which is safe because the prompt is
+synthetic), so run it before a real point, which costs about 250k tokens per arm. The code lives in `tools/behaviour/`, not in the plugin or the
 published package.
 
 ## Animated demo (macOS)
