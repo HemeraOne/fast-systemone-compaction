@@ -230,7 +230,7 @@ key), so it uses plan usage and shares the sampled session history with the
 model provider; it runs only when all three flags are given, and stops starting
 new points once the tokens the CLI reports reach the cap. For each point it runs
 the compacted history and the uncompacted one (the control) in an isolated
-child (`--safe-mode`, no built-in tools, no saved session), lets the model take
+child (user settings, hooks and plugins skipped, no built-in tools, no saved session), lets the model take
 its next step with five stub tools served by a small MCP server from the
 recorded history, and compares that step with the recorded one: `same` (right
 at once), `recovered` (right after extra lookups), `wrong` (a different action),
@@ -245,8 +245,10 @@ read files as the built-in summary does. Caveats: the history reaches the model
 as text rather than as real tool turns, a stand-in system prompt and tool set
 replace Claude Code's own, lookups match only exact repeats (a `Read` matches on
 path), the point count is small, and the CLI details the tool relies on are
-checked only by the first real run, which reports fixed failure reasons if one
-is wrong. The code lives in `tools/behaviour/`, not in the plugin or the
+checked only against the real CLI: `-- --check --model <id>` runs one tiny
+synthetic prompt (a few thousand tokens, no session text) through the same child
+and stub and says whether the model could use a stub tool, so run it before a
+real point, which costs about 250k tokens per arm. The code lives in `tools/behaviour/`, not in the plugin or the
 published package.
 
 ## Animated demo (macOS)
