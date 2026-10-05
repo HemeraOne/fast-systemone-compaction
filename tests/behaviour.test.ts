@@ -573,13 +573,23 @@ describe('runPoint', () => {
     expect((await runPoint(point, context, 'p', deps(scripted([ok(stream1)]).runner))).class).toBe('unreachable');
   });
 
-  it('gave-up: no tool call, and the sixth lookup', async () => {
+  it('gave-up, with its reason: no tool call, stopped after lookups, and the sixth lookup', async () => {
     const { point, context } = setup(reachableSession());
-    expect((await runPoint(point, context, 'p', deps(scripted([ok(stream())]).runner))).class).toBe('gave-up');
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(stream())]).runner))).toMatchObject({
+      class: 'gave-up',
+      reason: 'no tool call',
+    });
+    const stopped = stream({ calls: [call('Grep', { pattern: 'a' }), call('Grep', { pattern: 'b' })] });
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(stopped)]).runner))).toMatchObject({
+      class: 'gave-up',
+      lookups: 2,
+      reason: 'no final action',
+    });
     const lookups = Array.from({ length: 6 }, (_, i) => call('Grep', { pattern: `p${i}` }));
     expect(await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: lookups }))]).runner))).toMatchObject({
       class: 'gave-up',
       lookups: 6,
+      reason: 'lookup limit',
     });
   });
 
@@ -695,7 +705,7 @@ describe('report', () => {
     expect(text).toContain('Arm: compacted (2 judged, 1 failed to run)');
     expect(text).toMatch(/recovered\s+2\/2 \(100%\)/);
     expect(text).toMatch(/same\s+2\/3 \(67%\)/);
-    expect(text).toContain('recovered: median 3 extra lookups, 4.0 s');
+    expect(text).toContain('recovered: median 3 extra lookups, 4.0 s to the final action');
   });
 
   it('lists the fixed reasons of failed runs per arm, and why the run stopped', () => {
@@ -725,6 +735,41 @@ describe('report', () => {
     expect(text).toContain('Summary arm not run');
     expect(text).not.toContain('Arm: summary');
     expect(text).toContain('reaches the model as text');
+  });
+
+  it('says why an arm gave up, with the fixed reasons and their counts', () => {
+    const text = formatReport(
+      summarize(
+        [
+          record(outcome('gave-up', 0, 1, 'no tool call'), outcome('gave-up', 6, 1, 'lookup limit')),
+          record(outcome('gave-up', 0, 1, 'no tool call'), outcome('same')),
+        ],
+        info(),
+      ),
+    );
+    expect(text).toMatch(/gave-up\s+2\/2 \(100%\) - no tool call x2/);
+    expect(text).toMatch(/gave-up\s+1\/2 \(50%\) - lookup limit x1/);
+  });
+
+  it('shows the time to a final action per arm and the paired extra effort of compacted over control', () => {
+    const text = formatReport(
+      summarize(
+        [
+          record(outcome('same', 0, 10), outcome('recovered', 3, 70)),
+          record(outcome('same', 0, 20), outcome('recovered', 1, 50)),
+          record(outcome('gave-up', 0, 5, 'no tool call'), outcome('same', 0, 9)),
+        ],
+        info(),
+      ),
+    );
+    expect(text).toContain('time to final action: median 15.0 s over 2 outcome(s)');
+    expect(text).toContain('time to final action: median 50.0 s over 3 outcome(s)');
+    expect(text).toContain('extra effort of compacted over control: median +45.0 s and +2 lookups, over 2 point(s) where both arms reached a final action');
+  });
+
+  it('says there is nothing to compare when no point reached a final action in both arms', () => {
+    const text = formatReport(summarize([record(outcome('gave-up', 0, 1, 'no tool call'), outcome('same'))], info()));
+    expect(text).toContain('extra effort: no point reached a final action in both arms');
   });
 
   it('is a pure function of its input', () => {

@@ -16,7 +16,7 @@ export interface Outcome {
   seconds: number;
   /** Tokens the child reported (input, output, cache). */
   tokens: number;
-  /** Why a `failed` outcome failed: a fixed, non-sensitive phrase. */
+  /** Why a `failed` or `gave-up` outcome ended that way: a fixed, non-sensitive phrase. */
   reason?: string;
   /** The child reported no usage, so the cap cannot be enforced past this point. */
   unmetered?: boolean;
@@ -65,6 +65,7 @@ export async function runPoint(
     ...(unmetered ? { unmetered } : {}),
   });
   const failed = (reason: string): Outcome => ({ ...outcome('failed', 0, lastAt), reason });
+  const gaveUp = (lookups: number, at: number, reason: string): Outcome => ({ ...outcome('gave-up', lookups, at), reason });
 
   if (stubFailed(stream.stubStatus)) return failed(`stub not connected (${stream.stubStatus})`);
   if (stream.stubStatus === 'connected' && stream.toolsOffered === false) return failed('stub tools not offered');
@@ -77,13 +78,13 @@ export async function runPoint(
       return outcome(context.reachable ? 'wrong' : 'unreachable', lookups, call.at);
     }
     lookups++;
-    if (lookups > MAX_LOOKUPS) return outcome('gave-up', lookups, call.at);
+    if (lookups > MAX_LOOKUPS) return gaveUp(lookups, call.at, 'lookup limit');
   }
   if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
   if (stream.isError) return failed('error result');
   // A stub that was still starting when the child began may never have been offered to the model.
   if (stream.stubStatus === 'pending' && stream.calls.length === 0) return failed('stub still pending at start');
-  return outcome('gave-up', lookups, lastAt);
+  return gaveUp(lookups, lastAt, stream.calls.length === 0 ? 'no tool call' : 'no final action');
 }
 
 /** The text a tool-less child writes for `prompt` (the summary arm), with what it cost. */
