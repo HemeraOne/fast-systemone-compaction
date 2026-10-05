@@ -228,7 +228,12 @@ asks what the assistant actually does at the points where the replay found a
 lost value. It runs the `claude` CLI in print mode on your own login (no API
 key), so it uses plan usage and shares the sampled session history with the
 model provider; it runs only when all three flags are given, and stops starting
-new points once the tokens the CLI reports reach the cap. For each point it runs
+new points once the tokens the CLI reports reach the cap. Big sessions cost most
+(the history is resent each turn), so `-- --max-prefix-chars <n>` keeps only
+points whose history before the recorded step is at most n characters, and
+`-- --skip <n>` drops the first n points and then takes the next `--max-points`
+in order (instead of evenly spaced ones), so a later run continues where an
+earlier one stopped; the report names both under `Selection:`. For each point it runs
 the compacted history and the uncompacted one (the control) in an isolated
 child (user settings, hooks and plugins skipped, no built-in tools, no saved session), lets the model take
 its next step with five stub tools served by a small MCP server from the

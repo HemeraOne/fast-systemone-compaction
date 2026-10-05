@@ -20,7 +20,7 @@ import type { ChildRequest, ChildResult, ChildRunner, Scratch, StreamLine } from
 import { formatReport, summarize } from '../tools/behaviour/report.js';
 import type { PointRecord, RunInfo } from '../tools/behaviour/report.js';
 import { run } from '../tools/behaviour/run.js';
-import { lostPoints, sample } from '../tools/behaviour/select.js';
+import { choose, lostPoints, sample } from '../tools/behaviour/select.js';
 import type { LostPoint } from '../tools/behaviour/select.js';
 import { runPoint, runText } from '../tools/behaviour/session.js';
 import type { Outcome, SessionDeps } from '../tools/behaviour/session.js';
@@ -224,6 +224,14 @@ describe('selection', () => {
   it('ignores points without a loss and sessions that are not lost points', () => {
     const quiet = session([], { tool: 'Read', input: { file_path: 'src/billing.ts' } });
     expect(lostPoints(corpus({ 'p/q.jsonl': quiet })).points).toEqual([]);
+  });
+
+  it('continues in order after the skipped points when asked to skip, whatever the count', () => {
+    const items = Array.from({ length: 10 }, (_, i) => i);
+    expect(choose(items, 3, 4)).toEqual([4, 5, 6]);
+    expect(choose(items, 3, 9)).toEqual([9]);
+    expect(choose(items, 3, 10)).toEqual([]);
+    expect(choose(items, 3, undefined)).toEqual(sample(items, 3));
   });
 
   it('takes evenly spaced entries, all when there are fewer, the same every time', () => {
@@ -862,6 +870,55 @@ describe('run', () => {
   it('refuses arguments that are not positive whole numbers', async () => {
     const result = await runWith(['--model', 'm', '--max-points', '0', '--token-cap', 'lots'], scripted([]).runner);
     expect(result.code).toBe(1);
+  });
+
+  describe('selecting points', () => {
+    // a.jsonl has about 10k characters of history before its point, b.jsonl about 5k
+    const root = () => corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': unreachableSession() });
+
+    it('runs only points whose history fits --max-prefix-chars, and says so', async () => {
+      const model = needsTheValue();
+      const result = await runWith([...ARGS, '--root', root(), '--max-prefix-chars', '8000'], model.runner);
+      expect(result.code).toBe(0);
+      expect(model.requests).toHaveLength(2);
+      expect(result.output).toContain('b.jsonl');
+      expect(result.output).not.toContain('a.jsonl');
+      expect(result.output).toContain('Selection: history at most 8000 characters (1 of 2 points)');
+    });
+
+    it('continues in order after --skip, so a later run does not repeat an earlier one', async () => {
+      const one = ['--model', 'test-model', '--max-points', '1', '--token-cap', '100000', '--root', root()];
+      const first = await runWith([...one, '--skip', '0'], needsTheValue().runner);
+      const next = await runWith([...one, '--skip', '1'], needsTheValue().runner);
+      expect(first.output).toContain('a.jsonl');
+      expect(first.output).not.toContain('b.jsonl');
+      expect(next.output).toContain('b.jsonl');
+      expect(next.output).not.toContain('a.jsonl');
+      expect(next.output).toContain('Selection: first 1 skipped, then in order');
+    });
+
+    it('prints no selection line without either flag', async () => {
+      const result = await runWith([...ARGS, '--root', root()], needsTheValue().runner);
+      expect(result.output).not.toContain('Selection:');
+    });
+
+    it('refuses, starting nothing, when the size limit or the skip leaves no point', async () => {
+      const model = scripted([]);
+      const scratch = vi.fn(fakeScratch);
+      for (const extra of [['--max-prefix-chars', '10'], ['--skip', '2']]) {
+        const result = await runWith([...ARGS, '--root', root(), ...extra], model.runner, { createScratch: scratch });
+        expect(result.code).toBe(1);
+        expect(result.output).toContain('No lost point left');
+      }
+      expect(model.impl).not.toHaveBeenCalled();
+      expect(scratch).not.toHaveBeenCalled();
+    });
+
+    it('refuses a size limit or skip that is not a whole number', async () => {
+      for (const extra of [['--max-prefix-chars', '0'], ['--max-prefix-chars', 'big'], ['--skip', '-1'], ['--skip', 'some']]) {
+        expect((await runWith([...ARGS, '--root', root(), ...extra], scripted([]).runner)).code).toBe(1);
+      }
+    });
   });
 
   it('finishes the point in progress at the token cap and starts no more', async () => {
