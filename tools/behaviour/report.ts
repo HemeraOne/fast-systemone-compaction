@@ -14,6 +14,8 @@ export interface PointRecord {
 export interface RunInfo {
   model: string;
   sessions: number;
+  /** Lost points left out because their step is one of several parallel calls of its kind. */
+  skipped: number;
   available: number;
   tried: number;
   tokens: number;
@@ -122,7 +124,8 @@ export function formatReport(summary: Summary): string {
   const lines = [
     'Behaviour test: what the assistant does at points where compaction lost a value',
     `Model: ${run.model}`,
-    `Corpus: ${run.sessions} sessions, ${run.available} lost points available, ${run.tried} tried`,
+    `Corpus: ${run.sessions} sessions, ${run.available} lost points available` +
+      `${run.skipped > 0 ? ` (${run.skipped} more skipped: one of several parallel calls of its kind)` : ''}, ${run.tried} tried`,
     `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stopped === undefined ? '' : ` - stopped early (${run.tried} point(s) done): ${run.stopped}`}`,
     '',
   ];

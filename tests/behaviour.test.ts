@@ -234,6 +234,50 @@ describe('selection', () => {
   });
 });
 
+/** The recorded step is one of two parallel Edits in one message. */
+const batchedSession = (): Message[] => {
+  const base = reachableSession().slice(0, -2);
+  return [
+    ...base,
+    {
+      role: 'assistant',
+      text: '',
+      toolUses: [
+        { tool_use_id: 'b1', tool: 'Edit', input: { file_path: 'src/billing.ts', old_string: VALUE, new_string: 'x' } },
+        { tool_use_id: 'b2', tool: 'Edit', input: { file_path: 'src/other-file.ts', old_string: 'unrelated text', new_string: 'y' } },
+      ],
+    },
+    {
+      role: 'user',
+      text: '',
+      toolUses: [],
+      toolResults: [
+        { tool_use_id: 'b1', text: 'done', isError: false },
+        { tool_use_id: 'b2', text: 'done', isError: false },
+      ],
+    },
+  ];
+};
+
+describe('parallel calls', () => {
+  it('skips a lost point whose step is one of several calls of its kind, and counts it', () => {
+    const root = corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': batchedSession() });
+    const found = lostPoints(root);
+    expect(found.points.map((p) => p.session)).toEqual(['a.jsonl']);
+    expect(found.skipped).toBe(1);
+    expect(lostPoints(corpus({ 'p/a.jsonl': reachableSession() })).skipped).toBe(0);
+  });
+
+  it('says so in the report, and in the refusal when nothing else is left', async () => {
+    const mixed = corpus({ 'p/a.jsonl': reachableSession(), 'p/b.jsonl': batchedSession() });
+    const result = await runWith([...ARGS, '--root', mixed], needsTheValue().runner);
+    expect(result.output).toContain('1 lost points available (1 more skipped: one of several parallel calls of its kind)');
+    const onlyBatched = await runWith([...ARGS, '--root', corpus({ 'p/b.jsonl': batchedSession() })], scripted([]).runner);
+    expect(onlyBatched.code).toBe(1);
+    expect(onlyBatched.output).toContain('1 skipped as parallel calls');
+  });
+});
+
 describe('histories', () => {
   it('the compacted history lacks the lost value that the control history still has', () => {
     const point = pointOf(reachableSession());
@@ -627,6 +671,7 @@ const info = (extra: Partial<RunInfo> = {}): RunInfo => ({
   model: 'test-model',
   sessions: 3,
   available: 5,
+  skipped: 0,
   tried: 2,
   tokens: 40,
   tokenCap: 1000,

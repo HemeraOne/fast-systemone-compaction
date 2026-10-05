@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Message } from '../../src/index.js';
+import { familyOf } from './history.js';
 import { replaySession } from '../replay/replay.js';
 import type { Loss } from '../replay/replay.js';
 import { parseTranscript } from '../replay/transcript.js';
@@ -31,10 +32,16 @@ function sessionFiles(root: string): string[] {
   return files;
 }
 
-/** Every lost point of the corpus, ordered by session name then message index. */
-export function lostPoints(root: string): { points: LostPoint[]; sessions: number } {
+/**
+ * Every lost point of the corpus, ordered by session name then message index. A point whose
+ * recorded message holds other calls of the same kind (parallel edits, say) is skipped and
+ * counted: the model's first such call may be one of the siblings, which would score a valid
+ * answer as wrong even with the full history.
+ */
+export function lostPoints(root: string): { points: LostPoint[]; sessions: number; skipped: number } {
   const points: LostPoint[] = [];
   let sessions = 0;
+  let skipped = 0;
   for (const path of sessionFiles(root)) {
     let text: string;
     try {
@@ -48,6 +55,13 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
     const session = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
     for (const point of replaySession(session, messages).points) {
       if (point.status !== 'checked' || point.losses.length === 0) continue;
+      const siblings = messages[point.messageIndex]?.toolUses.some(
+        (use) => use.tool_use_id !== point.toolUseId && familyOf(use.tool) === familyOf(point.tool),
+      );
+      if (siblings) {
+        skipped++;
+        continue;
+      }
       points.push({
         session,
         path,
@@ -60,7 +74,7 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
     }
   }
   points.sort((a, b) => (a.session < b.session ? -1 : a.session > b.session ? 1 : a.messageIndex - b.messageIndex));
-  return { points, sessions };
+  return { points, sessions, skipped };
 }
 
 /** `count` evenly spaced entries (all of them when there are fewer). */
