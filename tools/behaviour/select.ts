@@ -77,6 +77,14 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
   return { points, sessions, skipped };
 }
 
+/**
+ * The points to run. By default `count` evenly spaced ones. With `skip`, the next `count` in
+ * order after the first `skip`, so a later run can continue where an earlier one stopped.
+ */
+export function choose<T>(points: readonly T[], count: number, skip: number | undefined): T[] {
+  return skip === undefined ? sample(points, count) : points.slice(skip, skip + count);
+}
+
 /** `count` evenly spaced entries (all of them when there are fewer). */
 export function sample<T>(points: readonly T[], count: number): T[] {
   if (points.length <= count) return [...points];

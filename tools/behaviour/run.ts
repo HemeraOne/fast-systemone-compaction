@@ -2,13 +2,13 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compactedHistory, controlHistory, flattenHistory, pointContext, summaryHistory, summaryPrompt } from './history.js';
+import { compactedHistory, controlHistory, flattenHistory, pointContext, renderTranscript, summaryHistory, summaryPrompt } from './history.js';
 import { runCheck } from './check.js';
 import { createScratch, spawnChild } from './model.js';
 import type { ChildRunner, Scratch } from './model.js';
 import { formatReport, summarize } from './report.js';
 import type { PointRecord } from './report.js';
-import { lostPoints, sample } from './select.js';
+import { choose, lostPoints } from './select.js';
 import type { LostPoint } from './select.js';
 import { runPoint, runText } from './session.js';
 import type { Arm, Outcome, SessionDeps } from './session.js';
@@ -27,7 +27,7 @@ export interface RunResult {
   output: string;
 }
 
-const VALUE_FLAGS = ['--model', '--max-points', '--token-cap', '--root'] as const;
+const VALUE_FLAGS = ['--model', '--max-points', '--token-cap', '--root', '--max-prefix-chars', '--skip'] as const;
 
 function flagValue(args: readonly string[], flag: string): string | undefined {
   const value = args[args.indexOf(flag) + 1];
@@ -36,6 +36,9 @@ function flagValue(args: readonly string[], flag: string): string | undefined {
 
 const positiveInt = (value: string | undefined): number | undefined =>
   value !== undefined && /^\d+$/.test(value) && Number(value) > 0 ? Number(value) : undefined;
+
+const wholeNumber = (value: string | undefined): number | undefined =>
+  value !== undefined && /^\d+$/.test(value) ? Number(value) : undefined;
 
 /** The summary arm: one tool-less call summarises the control history, then the point runs on it. */
 async function summaryOutcome(point: LostPoint, context: Parameters<typeof runPoint>[1], session: SessionDeps): Promise<Outcome> {
@@ -75,7 +78,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     exists: existsSync,
     ...overrides,
   };
-  const [model, maxPointsText, tokenCapText, rootArg] = VALUE_FLAGS.map((flag) => flagValue(argv, flag));
+  const [model, maxPointsText, tokenCapText, rootArg, maxPrefixText, skipText] = VALUE_FLAGS.map((flag) => flagValue(argv, flag));
 
   if (argv.includes('--check')) {
     if (model === undefined) return { code: 1, output: 'Missing required input: --model <id>' };
@@ -98,6 +101,11 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
   if (maxPoints === undefined || tokenCap === undefined) {
     return { code: 1, output: '--max-points and --token-cap each need a positive whole number' };
   }
+  const maxPrefix = positiveInt(maxPrefixText);
+  const skip = wholeNumber(skipText);
+  if ((argv.includes('--max-prefix-chars') && maxPrefix === undefined) || (argv.includes('--skip') && skip === undefined)) {
+    return { code: 1, output: '--max-prefix-chars needs a positive whole number and --skip a whole number' };
+  }
 
   const root = rootArg ?? join(homedir(), '.claude', 'projects');
   if (!deps.exists(root)) return { code: 1, output: `Corpus root not found: ${root}` };
@@ -107,6 +115,22 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     return { code: 1, output: `No lost point found in the corpus${note}; no child process was started` };
   }
 
+  const eligible =
+    maxPrefix === undefined
+      ? points
+      : points.filter((point) => renderTranscript(controlHistory(point.messages, point.messageIndex)).length <= maxPrefix);
+  const chosen = choose(eligible, maxPoints, skip);
+  if (chosen.length === 0) {
+    return { code: 1, output: `No lost point left after --max-prefix-chars and --skip (${eligible.length} of ${points.length} within the size limit); no child process was started` };
+  }
+  const selection =
+    maxPrefix === undefined && skip === undefined
+      ? undefined
+      : [
+          ...(maxPrefix === undefined ? [] : [`history at most ${maxPrefix} characters (${eligible.length} of ${points.length} points)`]),
+          ...(skip === undefined ? [] : [`first ${skip} skipped, then in order`]),
+        ].join(', ');
+
   const scratch = deps.createScratch();
   try {
     const session: SessionDeps = { runner: deps.runner, scratch, model: model!, now: deps.now };
@@ -115,7 +139,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     let tokens = 0;
     let stopped: string | undefined;
 
-    for (const point of sample(points, maxPoints)) {
+    for (const point of chosen) {
       if (tokens >= tokenCap) {
         stopped = 'token cap reached';
         break;
@@ -156,6 +180,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       tokenCap,
       stopped,
       summaryRan: withSummary,
+      selection,
     });
     return { code: 0, output: formatReport(report) };
   } finally {

@@ -23,6 +23,8 @@ export interface RunInfo {
   /** Why the run ended before the sample was done; `undefined` when it ran to the end. */
   stopped: string | undefined;
   summaryRan: boolean;
+  /** How the points were narrowed (size filter, skip); `undefined` for the default even sample. */
+  selection?: string;
 }
 
 export interface ArmSummary {
@@ -166,6 +168,7 @@ export function formatReport(summary: Summary): string {
     `Model: ${run.model}`,
     `Corpus: ${run.sessions} sessions, ${run.available} lost points available` +
       `${run.skipped > 0 ? ` (${run.skipped} more skipped: one of several parallel calls of its kind)` : ''}, ${run.tried} tried`,
+    ...(run.selection === undefined ? [] : [`Selection: ${run.selection}`]),
     `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stopped === undefined ? '' : ` - stopped early (${run.tried} point(s) done): ${run.stopped}`}`,
     '',
   ];
