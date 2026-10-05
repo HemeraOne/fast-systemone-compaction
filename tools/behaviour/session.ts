@@ -13,9 +13,13 @@ export interface Outcome {
   class: OutcomeClass;
   /** Lookups issued before the terminal action, answerable or not. */
   lookups: number;
+  /** Tool names of the lookups the stub could not answer (not a repeat of recorded history); absent when none. */
+  unanswered?: string[];
   seconds: number;
   /** Tokens the child reported (input, output, cache). */
   tokens: number;
+  /** A `gave-up` after lookups of which the stub answered none: the harness, not the model, left it stuck. */
+  harnessLimited?: boolean;
   /** Why a `failed` or `gave-up` outcome ended that way: a fixed, non-sensitive phrase. */
   reason?: string;
   /** The child reported no usage, so the cap cannot be enforced past this point. */
@@ -57,15 +61,22 @@ export async function runPoint(
   const tokens = stream.tokens ?? 0;
   const unmetered = stream.tokens === undefined;
   const lastAt = child.lines[child.lines.length - 1]?.at ?? started;
+  const unanswered: string[] = [];
   const outcome = (cls: OutcomeClass, lookups: number, at: number): Outcome => ({
     class: cls,
     lookups,
+    ...(unanswered.length > 0 ? { unanswered } : {}),
     seconds: seconds(at),
     tokens,
     ...(unmetered ? { unmetered } : {}),
   });
   const failed = (reason: string): Outcome => ({ ...outcome('failed', 0, lastAt), reason });
-  const gaveUp = (lookups: number, at: number, reason: string): Outcome => ({ ...outcome('gave-up', lookups, at), reason });
+  const gaveUp = (lookups: number, at: number, reason: string): Outcome => ({
+    ...outcome('gave-up', lookups, at),
+    reason,
+    // The stub checks at most MAX_LOOKUPS lookups; the one past the limit is never served.
+    ...(lookups > 0 && unanswered.length === Math.min(lookups, MAX_LOOKUPS) ? { harnessLimited: true } : {}),
+  });
 
   if (stubFailed(stream.stubStatus)) return failed(`stub not connected (${stream.stubStatus})`);
   if (stream.stubStatus === 'connected' && stream.toolsOffered === false) return failed('stub tools not offered');
@@ -79,6 +90,7 @@ export async function runPoint(
     }
     lookups++;
     if (lookups > MAX_LOOKUPS) return gaveUp(lookups, call.at, 'lookup limit');
+    if (context.lookup.serve({ tool: call.tool, input: call.input }) === undefined) unanswered.push(call.tool);
   }
   if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
   if (stream.isError) return failed('error result');

@@ -569,6 +569,25 @@ describe('runPoint', () => {
     expect(await runPoint(point, context, 'p', deps(model.runner))).toEqual({ class: 'recovered', lookups: 1, seconds: 2, tokens: 110 });
   });
 
+  it('is not harness-limited when the stub answered a lookup, or when there were none', async () => {
+    const { point, context } = setup(reachableSession());
+    const answered = stream({ calls: [call('Read', { file_path: 'src/billing.ts' }), call('Grep', { pattern: 'x' })] });
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(answered)]).runner))).toMatchObject({ class: 'gave-up', lookups: 2 });
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(answered)]).runner))).not.toHaveProperty('harnessLimited');
+    expect(await runPoint(point, context, 'p', deps(scripted([ok(stream())]).runner))).not.toHaveProperty('harnessLimited');
+  });
+
+  it('names the tools of lookups the stub cannot answer, and not those it can', async () => {
+    const { point, context } = setup(reachableSession());
+    const lookups = [call('Read', { file_path: 'src/billing.ts' }), call('Bash', { command: 'ls' }), call('Grep', { pattern: 'x' })];
+    const model = scripted([ok(stream({ calls: [...lookups, edit(VALUE)] }))]);
+    expect(await runPoint(point, context, 'p', deps(model.runner))).toMatchObject({
+      class: 'recovered',
+      lookups: 3,
+      unanswered: ['Bash', 'Grep'],
+    });
+  });
+
   it('wrong: a call that is not the recorded step on a reachable point', async () => {
     const { point, context } = setup(reachableSession());
     const outcome = await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [edit('something unrelated')] }))]).runner));
@@ -591,12 +610,16 @@ describe('runPoint', () => {
     expect(await runPoint(point, context, 'p', deps(scripted([ok(stopped)]).runner))).toMatchObject({
       class: 'gave-up',
       lookups: 2,
+      unanswered: ['Grep', 'Grep'],
+      harnessLimited: true,
       reason: 'no final action',
     });
     const lookups = Array.from({ length: 6 }, (_, i) => call('Grep', { pattern: `p${i}` }));
     expect(await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: lookups }))]).runner))).toMatchObject({
       class: 'gave-up',
       lookups: 6,
+      unanswered: ['Grep', 'Grep', 'Grep', 'Grep', 'Grep'],
+      harnessLimited: true,
       reason: 'lookup limit',
     });
   });
@@ -668,12 +691,13 @@ describe('runText', () => {
 
 // --- report ------------------------------------------------------------------------
 
-const outcome = (c: Outcome['class'], lookups = 0, seconds = 1, reason?: string): Outcome => ({
+const outcome = (c: Outcome['class'], lookups = 0, seconds = 1, reason?: string, unanswered?: string[]): Outcome => ({
   class: c,
   lookups,
   seconds,
   tokens: 10,
   ...(reason === undefined ? {} : { reason }),
+  ...(unanswered === undefined ? {} : { unanswered }),
 });
 
 const record = (control: Outcome, compacted: Outcome, session = 's.jsonl'): PointRecord => ({
@@ -756,7 +780,28 @@ describe('report', () => {
       ),
     );
     expect(text).toMatch(/gave-up\s+2\/2 \(100%\) - no tool call x2/);
-    expect(text).toMatch(/gave-up\s+1\/2 \(50%\) - lookup limit x1/);
+    expect(text).toMatch(/gave-up\s+1\/2 \(50%\) - lookup limit \(6 lookups, 0 unanswerable\) x1/);
+  });
+
+  it('leaves harness-limited gave-ups out of the control comparison and says so', () => {
+    const limited = { ...outcome('gave-up', 3, 1, 'no final action', ['Bash', 'Grep', 'Read']), harnessLimited: true };
+    const text = formatReport(summarize([record(limited, outcome('recovered', 2, 2)), record(outcome('gave-up', 0, 1, 'no tool call'), outcome('same'))], info()));
+    expect(text).toContain('harness-limited: 1 of the gave-up (the stub answered none of their lookups)');
+    expect(text).toContain('gave-up: compacted 0, control 1 (harness-limited left out: compacted 0, control 1) - within what the control arm shows');
+  });
+
+  it('shows how many lookups were unanswerable and which tools, for gave-up and recovered', () => {
+    const text = formatReport(
+      summarize(
+        [
+          record(outcome('gave-up', 3, 1, 'no final action', ['Bash', 'Grep']), outcome('recovered', 2, 2, undefined, ['Bash'])),
+          record(outcome('gave-up', 3, 1, 'no final action', ['Bash', 'Grep']), outcome('recovered', 2, 2, undefined, ['Bash'])),
+        ],
+        info(),
+      ),
+    );
+    expect(text).toMatch(/gave-up\s+2\/2 \(100%\) - no final action \(3 lookups, 2 unanswerable: Bash, Grep\) x2/);
+    expect(text).toContain('recovered: median 2 extra lookups, 2.0 s to the final action; unanswerable lookups: Bash x2');
   });
 
   it('shows the time to a final action per arm and the paired extra effort of compacted over control', () => {
