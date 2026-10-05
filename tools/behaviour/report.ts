@@ -36,8 +36,12 @@ export interface ArmSummary {
   medianSeconds: number | undefined;
   /** The fixed reasons of `failed` outcomes with how often each occurred, e.g. `exit 1 x2`. */
   failures: string[];
-  /** The same for `gave-up`: `no tool call`, `no final action` (stopped after lookups), `lookup limit`. */
+  /** The same for `gave-up`: `no tool call`, `no final action` (stopped after lookups), `lookup limit`; with lookups, each adds `(N lookups, M unanswerable: tools)`. */
   gaveUp: string[];
+  /** `gave-up` outcomes whose lookups the stub answered none of: a limit of the harness, not model behaviour. */
+  harnessLimited: number;
+  /** Tools of the lookups the stub could not answer in `recovered` outcomes, e.g. `Bash x2`; empty when none. */
+  recoveredUnanswered: string;
   /** Outcomes that reached a final action, and the median time to it. */
   finals: number;
   medianFinalSeconds: number | undefined;
@@ -69,13 +73,28 @@ function median(values: readonly number[]): number | undefined {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+/** Tool names with how often each occurred, e.g. `Bash x2, Grep`, in order of first appearance. */
+function toolCounts(tools: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const tool of tools) counts.set(tool, (counts.get(tool) ?? 0) + 1);
+  return [...counts].map(([tool, n]) => (n > 1 ? `${tool} x${n}` : tool)).join(', ');
+}
+
+/** What the model looked up before it stopped: a count and the tools the stub could not answer. */
+function lookupNote(outcome: Outcome): string {
+  const unanswered = outcome.unanswered ?? [];
+  return ` (${outcome.lookups} lookups, ${unanswered.length} unanswerable${unanswered.length > 0 ? `: ${toolCounts(unanswered)}` : ''})`;
+}
+
 /** `reason xN` for each distinct reason of the given class, in order of first appearance. */
 function reasons(outcomes: readonly Outcome[], cls: OutcomeClass): string[] {
   const counts = new Map<string, number>();
   for (const outcome of outcomes) {
-    if (outcome.class === cls) counts.set(outcome.reason ?? 'unknown', (counts.get(outcome.reason ?? 'unknown') ?? 0) + 1);
+    if (outcome.class !== cls) continue;
+    const label = `${outcome.reason ?? 'unknown'}${cls === 'gave-up' && outcome.lookups > 0 ? lookupNote(outcome) : ''}`;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
   }
-  return [...counts].map(([reason, n]) => `${reason} x${n}`);
+  return [...counts].map(([label, n]) => `${label} x${n}`);
 }
 
 export function summarize(points: readonly PointRecord[], run: RunInfo): Summary {
@@ -107,6 +126,8 @@ export function summarize(points: readonly PointRecord[], run: RunInfo): Summary
         medianSeconds: median(recovered.map((outcome) => outcome.seconds)),
         failures: reasons(outcomes, 'failed'),
         gaveUp: reasons(outcomes, 'gave-up'),
+        harnessLimited: outcomes.filter((outcome) => outcome.class === 'gave-up' && outcome.harnessLimited === true).length,
+        recoveredUnanswered: toolCounts(recovered.flatMap((outcome) => outcome.unanswered ?? [])),
         finals: finals.length,
         medianFinalSeconds: median(finals.map((outcome) => outcome.seconds)),
       };
@@ -125,12 +146,16 @@ function armLines(summary: ArmSummary): string[] {
     const why = c === 'gave-up' && summary.gaveUp.length > 0 ? ` - ${summary.gaveUp.join(', ')}` : '';
     lines.push(`  ${c.padEnd(12)}${count}/${summary.total} (${rate})${why}`);
   }
+  if (summary.harnessLimited > 0) {
+    lines.push(`  harness-limited: ${summary.harnessLimited} of the gave-up (the stub answered none of their lookups)`);
+  }
   if (summary.medianFinalSeconds !== undefined) {
     lines.push(`  time to final action: median ${summary.medianFinalSeconds.toFixed(1)} s over ${summary.finals} outcome(s)`);
   }
   if (summary.medianLookups !== undefined && summary.medianSeconds !== undefined) {
     lines.push(
-      `  recovered: median ${summary.medianLookups} extra lookups, ${summary.medianSeconds.toFixed(1)} s to the final action`,
+      `  recovered: median ${summary.medianLookups} extra lookups, ${summary.medianSeconds.toFixed(1)} s to the final action` +
+        `${summary.recoveredUnanswered === '' ? '' : `; unanswerable lookups: ${summary.recoveredUnanswered}`}`,
     );
   }
   if (summary.failures.length > 0) lines.push(`  failed to run: ${summary.failures.join(', ')}`);
@@ -145,11 +170,17 @@ function comparisonLines(arms: readonly ArmSummary[], paired: Paired): string[] 
   if (control === undefined || compacted === undefined) return [];
   const lines = ['Control comparison (compacted against the uncompacted history)'];
   for (const c of DEVIATIONS) {
-    const verdict =
-      compacted.counts[c] > control.counts[c]
-        ? 'more than the control arm shows'
-        : 'within what the control arm shows';
-    lines.push(`  ${c}: compacted ${compacted.counts[c]}, control ${control.counts[c]} - ${verdict}`);
+    // Harness-limited gave-ups say nothing about compaction, so they are left out of the comparison.
+    const [compactedCount, controlCount] =
+      c === 'gave-up'
+        ? [compacted.counts[c] - compacted.harnessLimited, control.counts[c] - control.harnessLimited]
+        : [compacted.counts[c], control.counts[c]];
+    const verdict = compactedCount > controlCount ? 'more than the control arm shows' : 'within what the control arm shows';
+    const excluded =
+      c === 'gave-up' && compacted.harnessLimited + control.harnessLimited > 0
+        ? ` (harness-limited left out: compacted ${compacted.harnessLimited}, control ${control.harnessLimited})`
+        : '';
+    lines.push(`  ${c}: compacted ${compactedCount}, control ${controlCount}${excluded} - ${verdict}`);
   }
   lines.push(
     paired.medianExtraSeconds === undefined || paired.medianExtraLookups === undefined
