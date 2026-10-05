@@ -101,8 +101,11 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
 
   const root = rootArg ?? join(homedir(), '.claude', 'projects');
   if (!deps.exists(root)) return { code: 1, output: `Corpus root not found: ${root}` };
-  const { points, sessions } = deps.lostPoints(root);
-  if (points.length === 0) return { code: 1, output: 'No lost point found in the corpus; no child process was started' };
+  const { points, sessions, skipped } = deps.lostPoints(root);
+  if (points.length === 0) {
+    const note = skipped > 0 ? ` (${skipped} skipped as parallel calls)` : '';
+    return { code: 1, output: `No lost point found in the corpus${note}; no child process was started` };
+  }
 
   const scratch = deps.createScratch();
   try {
@@ -147,6 +150,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       model: model!,
       sessions,
       available: points.length,
+      skipped,
       tried: records.length,
       tokens,
       tokenCap,
