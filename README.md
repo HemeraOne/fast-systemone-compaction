@@ -244,7 +244,8 @@ third arm built from a model-written summary; it does not re-attach recently
 read files as the built-in summary does. Caveats: the history reaches the model
 as text rather than as real tool turns, a stand-in system prompt and tool set
 replace Claude Code's own, lookups match only exact repeats (a `Read` matches on
-path), the point count is small, and the CLI details the tool relies on are
+path), a point whose recorded step is one of several parallel calls of its kind is
+skipped and counted, the point count is small, and the CLI details the tool relies on are
 checked only against the real CLI: `-- --check --model <id>` runs one tiny
 synthetic prompt (a few thousand tokens, no session text) through the same child
 and stub and says whether the model could use a stub tool (on a problem it also
