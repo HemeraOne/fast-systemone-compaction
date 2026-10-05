@@ -234,11 +234,13 @@ child (user settings, hooks and plugins skipped, no built-in tools, no saved ses
 its next step with five stub tools served by a small MCP server from the
 recorded history, and compares that step with the recorded one: `same` (right
 at once), `recovered` (right after extra lookups), `wrong` (a different action),
-`gave-up` (no action or too many lookups), `unreachable` (the lost value could
-not be recovered by any stub, and the action was not right), `failed` (the child
-did not run; left out of the rates, with a fixed reason in the report). The
-report lists counts, extra lookups, elapsed time, and the control's own
-deviation, never transcript text; the only files written are in a temporary
+`gave-up` (no tool call, stopping after lookups, or too many lookups, each shown
+as its own count), `unreachable` (the lost value could not be recovered by any
+stub, and the action was not right), `failed` (the child did not run; left out
+of the rates, with a fixed reason in the report). The report lists counts, extra
+lookups, the time to a final action, the control's own deviation and the extra
+effort of the compacted arm over the control (median extra time and lookups over
+the points where both arms reached a final action), never transcript text; the only files written are in a temporary
 scratch directory that is removed at the end. `-- --summary` adds an approximate
 third arm built from a model-written summary; it does not re-attach recently
 read files as the built-in summary does. Caveats: the history reaches the model

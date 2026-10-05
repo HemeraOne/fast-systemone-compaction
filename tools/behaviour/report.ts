@@ -34,16 +34,31 @@ export interface ArmSummary {
   medianSeconds: number | undefined;
   /** The fixed reasons of `failed` outcomes with how often each occurred, e.g. `exit 1 x2`. */
   failures: string[];
+  /** The same for `gave-up`: `no tool call`, `no final action` (stopped after lookups), `lookup limit`. */
+  gaveUp: string[];
+  /** Outcomes that reached a final action, and the median time to it. */
+  finals: number;
+  medianFinalSeconds: number | undefined;
+}
+
+/** Compacted against control over the points where both arms reached a final action. */
+export interface Paired {
+  points: number;
+  medianExtraSeconds: number | undefined;
+  medianExtraLookups: number | undefined;
 }
 
 export interface Summary {
   run: RunInfo;
   arms: ArmSummary[];
+  paired: Paired;
   points: PointRecord[];
 }
 
 const CLASSES: readonly OutcomeClass[] = ['same', 'recovered', 'wrong', 'gave-up', 'unreachable', 'failed'];
 const DEVIATIONS: readonly OutcomeClass[] = ['wrong', 'gave-up', 'unreachable'];
+const FINAL: readonly OutcomeClass[] = ['same', 'recovered', 'wrong', 'unreachable'];
+const reachedFinal = (outcome: Outcome | undefined): outcome is Outcome => outcome !== undefined && FINAL.includes(outcome.class);
 
 function median(values: readonly number[]): number | undefined {
   if (values.length === 0) return undefined;
@@ -52,33 +67,46 @@ function median(values: readonly number[]): number | undefined {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
-/** `reason xN` for each distinct reason, in order of first appearance. */
-function failureReasons(outcomes: readonly Outcome[]): string[] {
+/** `reason xN` for each distinct reason of the given class, in order of first appearance. */
+function reasons(outcomes: readonly Outcome[], cls: OutcomeClass): string[] {
   const counts = new Map<string, number>();
   for (const outcome of outcomes) {
-    if (outcome.class === 'failed') counts.set(outcome.reason ?? 'unknown', (counts.get(outcome.reason ?? 'unknown') ?? 0) + 1);
+    if (outcome.class === cls) counts.set(outcome.reason ?? 'unknown', (counts.get(outcome.reason ?? 'unknown') ?? 0) + 1);
   }
   return [...counts].map(([reason, n]) => `${reason} x${n}`);
 }
 
 export function summarize(points: readonly PointRecord[], run: RunInfo): Summary {
   const arms: Arm[] = run.summaryRan ? ['control', 'compacted', 'summary'] : ['control', 'compacted'];
+  const pairs = points.flatMap((point) => {
+    const { control, compacted } = point.outcomes;
+    return reachedFinal(control) && reachedFinal(compacted) ? [{ seconds: compacted.seconds - control.seconds, lookups: compacted.lookups - control.lookups }] : [];
+  });
   return {
     run,
     points: [...points],
+    paired: {
+      points: pairs.length,
+      medianExtraSeconds: median(pairs.map((pair) => pair.seconds)),
+      medianExtraLookups: median(pairs.map((pair) => pair.lookups)),
+    },
     arms: arms.map((arm) => {
       const outcomes = points.flatMap((point) => point.outcomes[arm] ?? []);
       const counts = Object.fromEntries(
         CLASSES.map((c) => [c, outcomes.filter((outcome) => outcome.class === c).length]),
       ) as Record<OutcomeClass, number>;
       const recovered = outcomes.filter((outcome) => outcome.class === 'recovered');
+      const finals = outcomes.filter(reachedFinal);
       return {
         arm,
         counts,
         total: outcomes.length - counts.failed,
         medianLookups: median(recovered.map((outcome) => outcome.lookups)),
         medianSeconds: median(recovered.map((outcome) => outcome.seconds)),
-        failures: failureReasons(outcomes),
+        failures: reasons(outcomes, 'failed'),
+        gaveUp: reasons(outcomes, 'gave-up'),
+        finals: finals.length,
+        medianFinalSeconds: median(finals.map((outcome) => outcome.seconds)),
       };
     }),
   };
@@ -92,18 +120,24 @@ function armLines(summary: ArmSummary): string[] {
   for (const c of CLASSES.filter((name) => name !== 'failed')) {
     const count = summary.counts[c];
     const rate = summary.total === 0 ? 'n/a' : `${Math.round((count / summary.total) * 100)}%`;
-    lines.push(`  ${c.padEnd(12)}${count}/${summary.total} (${rate})`);
+    const why = c === 'gave-up' && summary.gaveUp.length > 0 ? ` - ${summary.gaveUp.join(', ')}` : '';
+    lines.push(`  ${c.padEnd(12)}${count}/${summary.total} (${rate})${why}`);
+  }
+  if (summary.medianFinalSeconds !== undefined) {
+    lines.push(`  time to final action: median ${summary.medianFinalSeconds.toFixed(1)} s over ${summary.finals} outcome(s)`);
   }
   if (summary.medianLookups !== undefined && summary.medianSeconds !== undefined) {
     lines.push(
-      `  recovered: median ${summary.medianLookups} extra lookups, ${summary.medianSeconds.toFixed(1)} s`,
+      `  recovered: median ${summary.medianLookups} extra lookups, ${summary.medianSeconds.toFixed(1)} s to the final action`,
     );
   }
   if (summary.failures.length > 0) lines.push(`  failed to run: ${summary.failures.join(', ')}`);
   return lines;
 }
 
-function comparisonLines(arms: readonly ArmSummary[]): string[] {
+const signed = (value: number, digits = 1): string => `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
+
+function comparisonLines(arms: readonly ArmSummary[], paired: Paired): string[] {
   const control = arms.find((arm) => arm.arm === 'control');
   const compacted = arms.find((arm) => arm.arm === 'compacted');
   if (control === undefined || compacted === undefined) return [];
@@ -115,6 +149,12 @@ function comparisonLines(arms: readonly ArmSummary[]): string[] {
         : 'within what the control arm shows';
     lines.push(`  ${c}: compacted ${compacted.counts[c]}, control ${control.counts[c]} - ${verdict}`);
   }
+  lines.push(
+    paired.medianExtraSeconds === undefined || paired.medianExtraLookups === undefined
+      ? '  extra effort: no point reached a final action in both arms, so there is nothing to compare'
+      : `  extra effort of compacted over control: median ${signed(paired.medianExtraSeconds)} s and ` +
+          `${signed(paired.medianExtraLookups, 0)} lookups, over ${paired.points} point(s) where both arms reached a final action`,
+  );
   return lines;
 }
 
@@ -131,7 +171,7 @@ export function formatReport(summary: Summary): string {
   ];
   for (const arm of summary.arms) lines.push(...armLines(arm), '');
   if (!run.summaryRan) lines.push('Summary arm not run (pass --summary to add an approximate one)', '');
-  lines.push(...comparisonLines(summary.arms), '', 'Points');
+  lines.push(...comparisonLines(summary.arms, summary.paired), '', 'Points');
   for (const point of summary.points) {
     const results = summary.arms.map((arm) => `${arm.arm}=${point.outcomes[arm.arm]?.class ?? '-'}`).join(' ');
     lines.push(
