@@ -164,22 +164,29 @@ function armLines(summary: ArmSummary): string[] {
 
 const signed = (value: number, digits = 1): string => `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
 
-function comparisonLines(arms: readonly ArmSummary[], paired: Paired): string[] {
+function comparisonLines(arms: readonly ArmSummary[], paired: Paired, points: readonly PointRecord[]): string[] {
   const control = arms.find((arm) => arm.arm === 'control');
   const compacted = arms.find((arm) => arm.arm === 'compacted');
   if (control === undefined || compacted === undefined) return [];
   const lines = ['Control comparison (compacted against the uncompacted history)'];
+  // A point the control arm also got wrong is not decided by the history, so it says nothing about compaction.
+  const controlWrong = points.filter((point) => point.outcomes.control?.class === 'wrong');
+  const bothWrong = controlWrong.filter((point) => point.outcomes.compacted?.class === 'wrong').length;
   for (const c of DEVIATIONS) {
     // Harness-limited gave-ups say nothing about compaction, so they are left out of the comparison.
     const [compactedCount, controlCount] =
       c === 'gave-up'
         ? [compacted.counts[c] - compacted.harnessLimited, control.counts[c] - control.harnessLimited]
-        : [compacted.counts[c], control.counts[c]];
+        : c === 'wrong'
+          ? [compacted.counts[c] - bothWrong, control.counts[c] - controlWrong.length]
+          : [compacted.counts[c], control.counts[c]];
     const verdict = compactedCount > controlCount ? 'more than the control arm shows' : 'within what the control arm shows';
     const excluded =
       c === 'gave-up' && compacted.harnessLimited + control.harnessLimited > 0
         ? ` (harness-limited left out: compacted ${compacted.harnessLimited}, control ${control.harnessLimited})`
-        : '';
+        : c === 'wrong' && controlWrong.length > 0
+          ? ` (left out: ${controlWrong.length} point(s) wrong in the control arm too, so not decided by the history; compacted wrong there: ${bothWrong})`
+          : '';
     lines.push(`  ${c}: compacted ${compactedCount}, control ${controlCount}${excluded} - ${verdict}`);
   }
   lines.push(
@@ -205,7 +212,7 @@ export function formatReport(summary: Summary): string {
   ];
   for (const arm of summary.arms) lines.push(...armLines(arm), '');
   if (!run.summaryRan) lines.push('Summary arm not run (pass --summary to add an approximate one)', '');
-  lines.push(...comparisonLines(summary.arms, summary.paired), '', 'Points');
+  lines.push(...comparisonLines(summary.arms, summary.paired, summary.points), '', 'Points');
   for (const point of summary.points) {
     const results = summary.arms.map((arm) => `${arm.arm}=${point.outcomes[arm.arm]?.class ?? '-'}`).join(' ');
     lines.push(

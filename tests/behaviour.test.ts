@@ -757,9 +757,16 @@ describe('report', () => {
 
   it('says the difference is within the control arm when compacted does not exceed it', () => {
     const text = formatReport(summarize([record(outcome('wrong'), outcome('wrong'))], info()));
-    expect(text).toContain('wrong: compacted 1, control 1 - within what the control arm shows');
+    expect(text).toContain('wrong: compacted 0, control 0 (left out: 1 point(s) wrong in the control arm too, so not decided by the history; compacted wrong there: 1) - within what the control arm shows');
     const worse = formatReport(summarize([record(outcome('same'), outcome('wrong'))], info()));
     expect(worse).toContain('wrong: compacted 1, control 0 - more than the control arm shows');
+  });
+
+  it('leaves points the control arm got wrong out of the wrong comparison, but still counts a compacted-only miss', () => {
+    const text = formatReport(
+      summarize([record(outcome('wrong'), outcome('same')), record(outcome('wrong'), outcome('wrong')), record(outcome('same'), outcome('wrong'))], info()),
+    );
+    expect(text).toContain('wrong: compacted 1, control 0 (left out: 2 point(s) wrong in the control arm too, so not decided by the history; compacted wrong there: 1) - more than the control arm shows');
   });
 
   it('states that the summary arm was not run, prints no figure for it, and names the flattening caveat', () => {
