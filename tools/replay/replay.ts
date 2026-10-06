@@ -79,6 +79,15 @@ function stringLeaves(value: unknown, out: string[]): void {
   }
 }
 
+/**
+ * A tool result as the model saw it with the line numbers Read and Grep put in front of each
+ * line removed, so an edit target that spans lines can be found in it: with the numbers it never
+ * occurs verbatim. A secondary view of the text; the raw text is searched too.
+ */
+export function withoutLineNumbers(text: string): string {
+  return text.replace(/^ *\d+[\t→:-]/gm, '');
+}
+
 /** Every text block of a message, with the tool call it belongs to (none for plain text). */
 function blocks(message: Message): { owner: string | undefined; text: string }[] {
   const found: { owner: string | undefined; text: string }[] = [{ owner: undefined, text: message.text }];
@@ -90,6 +99,8 @@ function blocks(message: Message): { owner: string | undefined; text: string }[]
   }
   for (const result of message.toolResults ?? []) {
     found.push({ owner: result.tool_use_id, text: result.text });
+    const plain = withoutLineNumbers(result.text);
+    if (plain !== result.text) found.push({ owner: result.tool_use_id, text: plain });
   }
   return found;
 }

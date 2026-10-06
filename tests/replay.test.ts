@@ -241,6 +241,15 @@ describe('replaySession verdicts', () => {
     ]);
   });
 
+  it('finds a multi-line edit target in a numbered Read result, so it counts and can be lost', () => {
+    const target = 'first line of the target\n    second line of the target';
+    const numbered = ['x'.repeat(5000), '10\tfirst line of the target', '11\t    second line of the target', 'y'.repeat(5000)].join('\n');
+    const { messages, finalIndex } = session(pair('Read', { file_path: 'src/billing.ts' }, numbered), editing(target));
+    const point = pointAt(replaySession('s', messages), finalIndex);
+    expect(point.neededByKind.editTarget).toBe(1);
+    expect(point.losses.map((l) => l.kind)).toEqual(['editTarget']);
+  });
+
   it('attributes a value that lived only in a superseded read to rule 2', () => {
     const { messages, finalIndex } = session(
       [

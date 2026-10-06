@@ -389,6 +389,16 @@ describe('matchesRecorded', () => {
   const step = (tool: string, input: Record<string, unknown>): ToolUse => ({ tool_use_id: 'rec', tool, input });
   const prefix = [chat('user', `see ${around(10, VALUE, 10)}`)];
 
+  it('matches an edit whose target spans lines when the earlier Read result is numbered', () => {
+    const target = 'first line of the target\n    second line of the target';
+    const numbered = ['src/billing.ts', '10\tfirst line of the target', '11\t    second line of the target'].join('\n');
+    const read = pair('Read', { file_path: 'src/billing.ts' }, numbered);
+    const recorded = step('Edit', { file_path: 'src/billing.ts', old_string: target, new_string: 'a' });
+    const proposed = { tool: 'Edit', input: { file_path: 'src/billing.ts', old_string: target, new_string: 'b' } };
+    expect(matchesRecorded(proposed, recorded, read)).toBe(true);
+    expect(matchesRecorded({ ...proposed, input: { ...proposed.input, old_string: 'not in the file\nat all' } }, recorded, read)).toBe(false);
+  });
+
   it('matches a path after slash normalisation and the same tool family', () => {
     const recorded = step('Read', { file_path: 'src/billing.ts' });
     expect(matchesRecorded({ tool: 'Read', input: { file_path: 'src\\billing.ts' } }, recorded, [])).toBe(true);
