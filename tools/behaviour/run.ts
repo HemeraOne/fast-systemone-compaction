@@ -8,7 +8,7 @@ import { createScratch, spawnChild } from './model.js';
 import type { ChildRunner, Scratch } from './model.js';
 import { formatReport, summarize } from './report.js';
 import type { PointRecord } from './report.js';
-import { choose, lostPoints } from './select.js';
+import { choose, keptPoints, lostPoints } from './select.js';
 import type { LostPoint } from './select.js';
 import { runPoint, runText } from './session.js';
 import type { Arm, Outcome, SessionDeps } from './session.js';
@@ -18,6 +18,7 @@ export interface RunDeps {
   createScratch: () => Scratch;
   now: () => number;
   lostPoints: typeof lostPoints;
+  keptPoints: typeof keptPoints;
   exists: (path: string) => boolean;
 }
 
@@ -75,6 +76,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     createScratch,
     now,
     lostPoints,
+    keptPoints,
     exists: existsSync,
     ...overrides,
   };
@@ -109,10 +111,11 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
 
   const root = rootArg ?? join(homedir(), '.claude', 'projects');
   if (!deps.exists(root)) return { code: 1, output: `Corpus root not found: ${root}` };
-  const { points, sessions, skipped } = deps.lostPoints(root);
+  const kept = argv.includes('--kept');
+  const { points, sessions, skipped } = (kept ? deps.keptPoints : deps.lostPoints)(root);
   if (points.length === 0) {
     const note = skipped > 0 ? ` (${skipped} skipped as parallel calls)` : '';
-    return { code: 1, output: `No lost point found in the corpus${note}; no child process was started` };
+    return { code: 1, output: `No ${kept ? 'kept' : 'lost'} point found in the corpus${note}; no child process was started` };
   }
 
   const eligible =
@@ -121,7 +124,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       : points.filter((point) => renderTranscript(controlHistory(point.messages, point.messageIndex)).length <= maxPrefix);
   const chosen = choose(eligible, maxPoints, skip);
   if (chosen.length === 0) {
-    return { code: 1, output: `No lost point left after --max-prefix-chars and --skip (${eligible.length} of ${points.length} within the size limit); no child process was started` };
+    return { code: 1, output: `No ${kept ? 'kept' : 'lost'} point left after --max-prefix-chars and --skip (${eligible.length} of ${points.length} within the size limit); no child process was started` };
   }
   const selection =
     maxPrefix === undefined && skip === undefined
@@ -180,6 +183,7 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       tokenCap,
       stopped,
       summaryRan: withSummary,
+      kept,
       selection,
     });
     return { code: 0, output: formatReport(report) };
