@@ -183,6 +183,20 @@ describe('session message mapping', () => {
     expect(out[4]).toBe(messages[4]);
   });
 
+  it('gives the message carrying an elided-call note no handle, keeping its tool use and neighbours intact', () => {
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [
+      decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, { keepThreshold: 0.5 }),
+      decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.9 }, { keepThreshold: 0.5 }),
+    ];
+    const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
+    expect(out.map((m) => m.handle)).toEqual(['h-0', undefined, 'r-tool-2', 'h-5', 'h-6']);
+    expect(out[1]?.text).toBe('[fast-systemone-compaction elided 1 tool call and its result]');
+    expect(out[1]?.toolUses[0]).toBe(messages[3]!.toolUses[0]);
+    expect(out[2]).toBe(messages[4]);
+  });
+
   it('preserves short dropped-result messages and their handles', () => {
     const messages = transcript();
     messages[1]!.toolUses[0]!.text = 'y'.repeat(100);
