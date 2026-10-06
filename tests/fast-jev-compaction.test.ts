@@ -271,6 +271,63 @@ describe('decisions', () => {
     });
   });
 
+  describe('elided note', () => {
+    const drop = { keepCall: 0, keepResult: 0 };
+    const keep = { keepCall: 1, keepResult: 1 };
+    const compactWith = (
+      messages: readonly Message[],
+      answers: Record<string, { keepCall: number; keepResult: number }>,
+    ) => {
+      const calls = collectToolCalls(messages, 0);
+      const decisions = calls.map((c) => decideCall(c, answers[c.tool_use_id] ?? keep, options));
+      return applyDecisions(messages, decisions, calls, 300);
+    };
+
+    it('puts one note on the next assistant message for consecutive dropped calls', () => {
+      const messages = transcript();
+      const kept = compactWith(messages, { 'tool-2': drop, 'tool-3': drop });
+      expect(kept.map((m) => m.text)).toEqual([
+        'Never edit anything under src/generated. Fix the failing test.',
+        '',
+        '',
+        'a.ts looks fine; checking b.ts',
+        '[fast-systemone-compaction elided 2 tool calls and their results]\nThe failure is in b.test.ts; fixing now.',
+        'go ahead',
+      ]);
+      expect(kept[3]).toBe(messages[3]);
+      expect(kept[5]).toBe(messages[9]);
+    });
+
+    it('never edits user text and adds no note for a truncated result', () => {
+      const messages = transcript();
+      messages[5]!.toolResults![0]!.text = 'x'.repeat(2000);
+      const truncated = compactWith(messages, { 'tool-2': { keepCall: 1, keepResult: 0 } });
+      expect(truncated.some((m) => m.text.includes('elided'))).toBe(false);
+
+      const dropped = compactWith(messages, { 'tool-3': drop });
+      expect(dropped.filter((m) => m.role === 'user').map((m) => m.text)).not.toContainEqual(
+        expect.stringContaining('elided'),
+      );
+    });
+
+    it('merges into the existing note when the same gap is compacted again', () => {
+      const once = compactWith(transcript(), { 'tool-2': drop });
+      const note1 = '[fast-systemone-compaction elided 1 tool call and its result]';
+      expect(once.filter((m) => m.text.includes('elided')).map((m) => m.text)).toEqual([note1]);
+
+      // Compacting again with nothing new to drop leaves the note as it is.
+      const same = compactWith(once, {});
+      expect(same.map((m) => m.text)).toEqual(once.map((m) => m.text));
+
+      // A call dropped in the message that carries the note moves its count on.
+      const twice = compactWith(once, { 'tool-3': drop });
+      const notes = twice.filter((m) => m.text.includes('elided'));
+      expect(notes.map((m) => m.text)).toEqual([
+        '[fast-systemone-compaction elided 2 tool calls and their results]\nThe failure is in b.test.ts; fixing now.',
+      ]);
+    });
+  });
+
   it('removes dropped calls and truncates dropped results', () => {
     const messages = transcript();
     messages[4]!.toolUses[0]!.text = 'x'.repeat(2000);
@@ -285,7 +342,7 @@ describe('decisions', () => {
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Never edit anything under src/generated. Fix the failing test.',
-      'a.ts looks fine; checking b.ts',
+      '[fast-systemone-compaction elided 1 tool call and its result]\na.ts looks fine; checking b.ts',
       'tool-2',
       'tool-2',
       'tool-3',
