@@ -155,11 +155,31 @@ function truncatedResultText(text: string, isError: boolean, keepChars: number):
   }; re-run the tool if needed]${tail}`;
 }
 
+const ELIDED_NOTE =
+  /^\[fast-systemone-compaction elided (\d+) tool (?:call and its result|calls and their results)\]\n?/;
+
+/**
+ * Starts `text` with a note that `count` tool calls were removed before it. A
+ * note already there (from an earlier compaction of the same gap) is merged, so
+ * repeated compaction does not stack notes.
+ */
+function withElidedNote(text: string, count: number): string {
+  const prior = ELIDED_NOTE.exec(text);
+  const total = count + (prior ? Number(prior[1]) : 0);
+  const body = prior ? text.slice(prior[0].length) : text;
+  const note = `[fast-systemone-compaction elided ${total} tool ${
+    total === 1 ? 'call and its result' : 'calls and their results'
+  }]`;
+  return body.length > 0 ? `${note}\n${body}` : note;
+}
+
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result keeps a bounded head and note.
- * Messages that lose all their content are removed; untouched messages are
- * returned as the same objects they came in as.
+ * together with its result and leaves a note at the start of the next retained
+ * assistant message; a dropped result keeps a bounded head and note. Messages
+ * that lose all their content are removed; untouched messages are returned as
+ * the same objects they came in as, unless a note has to be added to them.
+ * User text is never edited.
  */
 export function applyDecisions(
   messages: readonly Message[],
@@ -174,11 +194,15 @@ export function applyDecisions(
     if (call && decision.action !== 'keep') actions.set(call.tool_use_id, decision.action);
   }
   const kept: Message[] = [];
+  // Dropped calls not yet announced; carried to the next retained assistant message.
+  let elided = 0;
   for (const message of messages) {
+    elided += message.toolUses.filter((tool) => actions.get(tool.tool_use_id) === 'drop_call').length;
+    const announce = elided > 0 && message.role === 'assistant';
     const touched =
       message.toolUses.some((tool) => actions.has(tool.tool_use_id)) ||
       (message.toolResults ?? []).some((result) => actions.has(result.tool_use_id));
-    if (!touched) {
+    if (!touched && !announce) {
       kept.push(message);
       continue;
     }
@@ -215,6 +239,7 @@ export function applyDecisions(
             };
       });
     if (
+      !announce &&
       !message.toolUses.some(
         (tool) => actions.get(tool.tool_use_id) === 'drop_call',
       ) &&
@@ -229,10 +254,17 @@ export function applyDecisions(
       kept.push(message);
       continue;
     }
-    if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
-      continue;
+    if (touched && toolUses.length === 0 && toolResults.length === 0) {
+      // A message left with nothing but an earlier note is removed; its count moves on.
+      const prior = message.role === 'assistant' ? ELIDED_NOTE.exec(message.text) : null;
+      if ((prior ? message.text.slice(prior[0].length) : message.text).trim().length === 0) {
+        if (prior) elided += Number(prior[1]);
+        continue;
+      }
     }
-    const rebuilt: Message = { role: message.role, text: message.text, toolUses };
+    const text = announce ? withElidedNote(message.text, elided) : message.text;
+    if (announce) elided = 0;
+    const rebuilt: Message = { role: message.role, text, toolUses };
     if (toolResults.length > 0) rebuilt.toolResults = toolResults;
     kept.push(rebuilt);
   }
