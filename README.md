@@ -257,7 +257,7 @@ checked only against the real CLI: `-- --check --model <id>` runs one tiny
 synthetic prompt (a few thousand tokens, no session text) through the same child
 and stub and says whether the model could use a stub tool (on a problem it also
 prints what the child itself reported, which is safe because the prompt is
-synthetic), so run it before a real point, which costs about 250k tokens per arm. `-- --kept` runs the same two arms on points where compaction lost nothing instead, and the report adds a `doubt` line: how often each arm looked something up although it already had every value it needed, which shows whether the compacted history (with its notes where calls were left out) makes the model distrust what it kept. The code lives in `tools/behaviour/`, not in the plugin or the
+synthetic), so run it before a real point, which costs about 250k tokens per arm. `-- --kept` runs the same two arms on edit and command points where compaction lost nothing instead (a `Read` step is left out, since a re-read there is the final action), and the report adds a `doubt` line: how often each arm looked something up although it already had every value it needed, which shows whether the compacted history (with its notes where calls were left out) makes the model distrust what it kept. The code lives in `tools/behaviour/`, not in the plugin or the
 published package.
 
 ## Animated demo (macOS)

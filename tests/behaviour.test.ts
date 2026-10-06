@@ -239,10 +239,13 @@ describe('selection', () => {
     expect(lostPoints(corpus({ 'p/q.jsonl': quiet })).points).toEqual([]);
   });
 
-  it('selects kept points apart from lost ones, and only those that needed an earlier value', () => {
+  it('selects kept points apart from lost ones, and only edit and command steps that needed an earlier value', () => {
     const quiet = session([], { tool: 'Read', input: { file_path: 'src/billing.ts' } });
     const root = corpus({ 'p/k.jsonl': keptSession(), 'p/l.jsonl': reachableSession(), 'p/q.jsonl': quiet });
     expect(keptPoints(root).points.map((p) => [p.session, p.losses.length])).toEqual([['k.jsonl', 0]]);
+    // A Read step is left out: a re-read there is the final action, so doubt could not show.
+    const reading = session(pair('Read', { file_path: 'src/billing.ts' }, around(100, VALUE, 100)), { tool: 'Read', input: { file_path: 'src/billing.ts' } });
+    expect(keptPoints(corpus({ 'p/r.jsonl': [...pair('Read', { file_path: 'src/other.ts' }, 'c'.repeat(20_000)), ...reading] })).points).toEqual([]);
     expect(lostPoints(root).points.map((p) => p.session)).toEqual(['l.jsonl']);
   });
 

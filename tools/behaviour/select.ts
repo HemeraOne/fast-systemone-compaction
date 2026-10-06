@@ -42,7 +42,11 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
   return collect(root, true);
 }
 
-/** The checked points that needed an earlier value and lost none: the model has all it needs, so a lookup there is doubt. */
+/**
+ * The checked edit and command points that needed an earlier value and lost none: the model has
+ * all it needs, so a lookup there is doubt. A Read step is left out: a re-read of the file there
+ * is the final action itself, so doubt would not show.
+ */
 export function keptPoints(root: string): { points: LostPoint[]; sessions: number; skipped: number } {
   return collect(root, false);
 }
@@ -63,7 +67,7 @@ function collect(root: string, lost: boolean): { points: LostPoint[]; sessions: 
     sessions++;
     const session = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
     for (const point of replaySession(session, messages).points) {
-      if (point.status !== 'checked' || (point.losses.length > 0) !== lost || (!lost && point.needed === 0)) continue;
+      if (point.status !== 'checked' || (point.losses.length > 0) !== lost || (!lost && (point.needed === 0 || familyOf(point.tool) === 'read'))) continue;
       const siblings = messages[point.messageIndex]?.toolUses.some(
         (use) => use.tool_use_id !== point.toolUseId && familyOf(use.tool) === familyOf(point.tool),
       );
