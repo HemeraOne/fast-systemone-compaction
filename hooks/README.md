@@ -174,7 +174,12 @@ count different points (a point is skipped when compaction saves less than the
 minimum, and the cap makes more of them skip), so the rates are not like-for-like,
 and the targets above are met by neither. A live check on three of the nine
 points the cap rescues was inconclusive (one run per rule set, one point
-worse with the cap, none better).
+worse with the cap, none better). A larger check on four of the nine points
+(15 of 24 planned runs; it stopped at its token cap) was inconclusive too:
+the old rules gave 3 recovered, 3 wrong and 2 gave up in 8 runs, the cap 2
+recovered, 2 wrong, 2 gave up and 1 unchanged in 7, and the same point and
+rule set changed outcome between repeats, so run-to-run variance is as large
+as any difference.
 Sessions that no longer reach it fall back to the built-in summary. Whether
 the remaining loss degrades later assistant behaviour has not been tested; a
 lost value is an upper bound on harm, not proof of it. Treat the rules as the
