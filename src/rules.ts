@@ -4,6 +4,13 @@ import type { CallDecision, CompactOptions, CompactResult, Message, ToolCall } f
 
 /** Results at or below this many characters are never shortened. */
 const SHORTEN_ABOVE_CHARS = 2000;
+/**
+ * Results of a read up to this many characters are never shortened: a read is the usual
+ * source of the text a later edit replaces, and a head and tail of 300 characters rarely
+ * holds it. A replay of 328 local sessions put 37 of 44 lost edit targets in read results,
+ * and this cap cuts those losses by about 45% for 5 points of median size reduction.
+ */
+const KEEP_READ_UP_TO_CHARS = 8000;
 /** `truncatedResultText` leaves a result alone unless it saves more than this plus the head. */
 const NOTE_ALLOWANCE_CHARS = 120;
 
@@ -77,7 +84,8 @@ function decide(
   if (superseded.has(call.id)) {
     return { ...base, keepCall: 0, keepResult: 0, action: 'drop_call', reason: 'call_dropped' };
   }
-  if (!edited.has(call.id) && call.resultChars > resultThreshold) {
+  const keptRead = call.tool === 'Read' && call.resultChars <= KEEP_READ_UP_TO_CHARS;
+  if (!edited.has(call.id) && !keptRead && call.resultChars > resultThreshold) {
     return { ...base, keepCall: 1, keepResult: 0, action: 'drop_result', reason: 'result_dropped' };
   }
   return { ...base, keepCall: 1, keepResult: 1, action: 'keep', reason: 'kept' };

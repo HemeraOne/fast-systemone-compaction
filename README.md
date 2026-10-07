@@ -168,8 +168,8 @@ just the repo's `.claude-plugin/marketplace.json`.
 
 Set the `compactionMode` plugin option to `rules` to compact without any
 backend: large old tool results (over 2,000 characters) are cut to a head and a
-tail around a note (except reads of a file that a later edit or write follows,
-which are kept whole), and file reads that a later full read or write of the
+tail around a note (except reads of up to 8,000 characters, and reads of a file
+that a later edit or write follows, which are kept whole), and file reads that a later full read or write of the
 same file supersedes are removed (a partial read only when a later full read
 exists).
 No key or endpoint is needed and no request is made. Unset keeps the System

@@ -112,9 +112,9 @@ The rules apply only outside the protected messages (the first and the newest
    characters (or `truncateHeadChars` + 120 when that is larger) keeps
    `truncateHeadChars` characters (half from its start, half from its end)
    with the usual one-line note between them; the call stays. The result of a
-   `Read` is kept whole when a later successful `Edit`, `MultiEdit`, or `Write`
-   of the same file is in the history: its text is the likely source of the next
-   edit.
+   `Read` is kept whole when it is at most 8,000 characters, or when a later
+   successful `Edit`, `MultiEdit`, or `Write` of the same file is in the
+   history: its text is the likely source of the next edit.
 2. **Superseded reads are removed**, call and result together. A full-file
    `Read` goes when a later successful full `Read` or `Write` of the same
    `file_path` exists. A partial `Read` (with `offset` or `limit`) goes only
@@ -162,6 +162,19 @@ the edit-target (8%) and session-share (80%) targets are not met. In the
 are in a read of the file that the assistant edits next, for the first time:
 the rules cannot know an edit is coming, and keeping every read whole would
 cut the share of sessions reaching the minimum to 29%.
+The figures above under-count edit-target losses: the replay missed edit
+targets that span several lines inside numbered `Read` and `Grep` results. After
+that fix, on the corpus of 2026-10-07 (334 sessions), the rules before the 8,000
+character read cap lose 5.7% of values (46 of 813) and 15.3% of edit targets
+(45 of 294), at a median of 33.6% with 71.7% of sessions reaching the minimum.
+With the cap, the same corpus gives 3.8% of values (26 of 678) and 10.4% of
+edit targets (25 of 240), at a median of 29.0% with 58.8% of sessions reaching
+the minimum; all losses in both runs come from the large-result rule. The two runs
+count different points (a point is skipped when compaction saves less than the
+minimum, and the cap makes more of them skip), so the rates are not like-for-like,
+and the targets above are met by neither. A live check on three of the nine
+points the cap rescues was inconclusive (one run per rule set, one point
+worse with the cap, none better).
 Sessions that no longer reach it fall back to the built-in summary. Whether
 the remaining loss degrades later assistant behaviour has not been tested; a
 lost value is an upper bound on harm, not proof of it. Treat the rules as the
