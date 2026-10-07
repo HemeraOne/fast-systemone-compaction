@@ -137,6 +137,14 @@ export interface Lookup {
   serve(call: ToolCallRequest): string | undefined;
   /** Every result `serve` could return. */
   servable: readonly string[];
+  /** The label for a call `serve` cannot answer: the tool name, with a reason for a Read. */
+  miss(call: ToolCallRequest): string;
+}
+
+/** Whether two paths differ only in case, a drive prefix or a relative-versus-absolute spelling. */
+function respelled(a: string, b: string): boolean {
+  const [x, y] = [a.toLowerCase().replace(/^\.\//, ''), b.toLowerCase().replace(/^\.\//, '')];
+  return x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`);
 }
 
 export function buildLookup(prefix: readonly Message[]): Lookup {
@@ -168,6 +176,14 @@ export function buildLookup(prefix: readonly Message[]): Lookup {
       const key = lookupKey(call.tool, call.input);
       const entry = key === undefined ? undefined : entries.get(key);
       return entry !== undefined && current(entry) ? entry.text : undefined;
+    },
+    miss(call) {
+      if (call.tool !== 'Read') return call.tool;
+      const path = slashed(call.input['file_path']);
+      const key = lookupKey(call.tool, call.input);
+      if (key !== undefined && entries.has(key)) return 'Read (stale)';
+      const recorded = [...entries.values()].some((entry) => path !== undefined && entry.path !== undefined && respelled(path, entry.path));
+      return recorded ? 'Read (respelled)' : 'Read (never read)';
     },
   };
 }

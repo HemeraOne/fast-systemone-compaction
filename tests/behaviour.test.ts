@@ -379,6 +379,16 @@ describe('lookups', () => {
     expect(buildLookup([...read, ...changed(true)]).serve({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBe('BODY-A');
   });
 
+  it('labels an unanswerable Read as never read, respelled or stale, and other tools by name', () => {
+    const lookup = buildLookup([chat('user', 'go'), ...read, ...rest]);
+    expect(lookup.miss({ tool: 'Read', input: { file_path: 'src/b.ts' } })).toBe('Read (never read)');
+    expect(lookup.miss({ tool: 'Read', input: { file_path: 'C:/repo/SRC/a.ts' } })).toBe('Read (respelled)');
+    expect(lookup.miss({ tool: 'Read', input: { file_path: './src/a.ts' } })).toBe('Read (respelled)');
+    expect(lookup.miss({ tool: 'Bash', input: { command: 'ls' } })).toBe('Bash');
+    const written = pair('Edit', { file_path: 'src/a.ts', old_string: 'o', new_string: 'n' }, 'r');
+    expect(buildLookup([...read, ...written]).miss({ tool: 'Read', input: { file_path: 'src/a.ts' } })).toBe('Read (stale)');
+  });
+
   it('reports a point as reachable only when a lost value sits in a result the stubs can serve', () => {
     expect(pointContext(pointOf(reachableSession())).reachable).toBe(true);
     expect(pointContext(pointOf(unreachableSession())).reachable).toBe(false);
