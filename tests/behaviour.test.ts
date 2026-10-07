@@ -520,7 +520,7 @@ describe('spawnChild', () => {
     const init = JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'stub', status: 'failed' }] });
     writeFileSync(script, `console.log(${JSON.stringify(init)});\nsetInterval(() => {}, 1000);\n`);
     const started = Date.now();
-    const result = await spawnChild(Date.now, process.execPath)({ args: [script], prompt: 'x', cwd: dir, timeoutMs: 60_000 });
+    const result = await spawnChild(Date.now, process.execPath)({ args: [script, '--mcp-config', 'x'], prompt: 'x', cwd: dir, timeoutMs: 60_000 });
     expect(Date.now() - started).toBeLessThan(30_000);
     expect(result).toMatchObject({ ok: true, code: null });
     expect(result.ok && result.lines).toHaveLength(1);

@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnChild } from '../tools/behaviour/model.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -482,4 +483,18 @@ describe('documentation', () => {
     const readme = readFileSync(join(__dirname, '..', 'README.md'), 'utf8').replace(/\r\n/g, '\n');
     expect(readme).toContain(`> ${JUDGE_PROMPT}`);
   });
+});
+
+describe('a tool-less child', () => {
+  it('runs to its result although its init event lists no stub server', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'judge-spawn-'));
+    dirs.push(dir);
+    const script = join(dir, 'fake-claude.mjs');
+    const init = JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [], tools: [] });
+    const result = JSON.stringify({ type: 'result', is_error: false, result: 'equivalent', usage: { input_tokens: 1, output_tokens: 1 } });
+    writeFileSync(script, `console.log(${JSON.stringify(init)});\nsetTimeout(() => console.log(${JSON.stringify(result)}), 300);\n`);
+    const child = await spawnChild(Date.now, process.execPath)({ args: [script], prompt: 'x', cwd: dir, timeoutMs: 60_000 });
+    expect(child).toMatchObject({ ok: true, code: 0 });
+    expect(child.ok && child.lines).toHaveLength(2);
+  }, 40_000);
 });
