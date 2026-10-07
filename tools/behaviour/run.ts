@@ -6,7 +6,9 @@ import { compactedHistory, controlHistory, flattenHistory, pointContext, renderT
 import { runCheck } from './check.js';
 import { createScratch, spawnChild } from './model.js';
 import type { ChildRunner, Scratch } from './model.js';
-import { formatReport, summarize } from './report.js';
+import { CALIBRATION_UNREADABLE, calibrate, JudgeBudget, judgeIfOpen, loadCalibrationSet } from './judge.js';
+import type { CalibrationPair, CalibrationResult } from './judge.js';
+import { calibrationLine, formatReport, summarize } from './report.js';
 import type { PointRecord } from './report.js';
 import { choose, keptPoints, lostPoints } from './select.js';
 import type { LostPoint } from './select.js';
@@ -20,6 +22,7 @@ export interface RunDeps {
   lostPoints: typeof lostPoints;
   keptPoints: typeof keptPoints;
   exists: (path: string) => boolean;
+  readCalibration: typeof loadCalibrationSet;
 }
 
 export interface RunResult {
@@ -28,7 +31,16 @@ export interface RunResult {
   output: string;
 }
 
-const VALUE_FLAGS = ['--model', '--max-points', '--token-cap', '--root', '--max-prefix-chars', '--skip'] as const;
+const VALUE_FLAGS = [
+  '--model',
+  '--max-points',
+  '--token-cap',
+  '--root',
+  '--max-prefix-chars',
+  '--skip',
+  '--judge-token-cap',
+  '--calibrate',
+] as const;
 
 function flagValue(args: readonly string[], flag: string): string | undefined {
   const value = args[args.indexOf(flag) + 1];
@@ -78,9 +90,12 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
     lostPoints,
     keptPoints,
     exists: existsSync,
+    readCalibration: loadCalibrationSet,
     ...overrides,
   };
-  const [model, maxPointsText, tokenCapText, rootArg, maxPrefixText, skipText] = VALUE_FLAGS.map((flag) => flagValue(argv, flag));
+  const [model, maxPointsText, tokenCapText, rootArg, maxPrefixText, skipText, judgeCapText, calibrateArg] = VALUE_FLAGS.map((flag) =>
+    flagValue(argv, flag),
+  );
 
   if (argv.includes('--check')) {
     if (model === undefined) return { code: 1, output: 'Missing required input: --model <id>' };
@@ -89,6 +104,38 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       return await runCheck({ runner: deps.runner, scratch, model, now: deps.now });
     } finally {
       scratch.cleanup();
+    }
+  }
+
+  const judging = argv.includes('--judge');
+  const calibrating = argv.includes('--calibrate');
+  const judgeCap = positiveInt(judgeCapText);
+  let pairs: CalibrationPair[] | undefined;
+  if (judging || calibrating) {
+    const absent = [
+      ...(model === undefined ? ['--model <id>'] : []),
+      ...(judgeCapText === undefined ? ['--judge-token-cap <n>'] : []),
+      ...(calibrating && calibrateArg === undefined ? ['--calibrate <file>'] : []),
+    ];
+    if (absent.length > 0) return { code: 1, output: `Missing required input: ${absent.join(', ')}` };
+    if (judgeCap === undefined) return { code: 1, output: '--judge-token-cap needs a positive whole number' };
+    if (calibrating) {
+      try {
+        pairs = deps.readCalibration(calibrateArg!);
+      } catch (error) {
+        return { code: 1, output: error instanceof Error ? error.message : CALIBRATION_UNREADABLE };
+      }
+    }
+    if (!judging) {
+      const scratch = deps.createScratch();
+      try {
+        const budget = new JudgeBudget(judgeCap);
+        const result = await calibrate(pairs!, budget, { runner: deps.runner, scratch, model: model!, now: deps.now });
+        const lines = ['Judge calibration', `Model: ${model}`, calibrationLine(result), `Judge tokens: ${budget.used} used, cap ${judgeCap}`];
+        return { code: 0, output: lines.join('\n') };
+      } finally {
+        scratch.cleanup();
+      }
     }
   }
 
@@ -138,6 +185,9 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
   try {
     const session: SessionDeps = { runner: deps.runner, scratch, model: model!, now: deps.now };
     const records: PointRecord[] = [];
+    const budget = judging ? new JudgeBudget(judgeCap!) : undefined;
+    const calibration: CalibrationResult | undefined =
+      budget !== undefined && pairs !== undefined ? await calibrate(pairs, budget, session) : undefined;
     const withSummary = argv.includes('--summary');
     let tokens = 0;
     let stopped: string | undefined;
@@ -153,6 +203,15 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       const compacted = await runPoint(point, context, flattenHistory(compactedHistory(point.messages, k)), session);
       const outcomes: Partial<Record<Arm, Outcome>> = { control, compacted };
       if (withSummary) outcomes.summary = await summaryOutcome(point, context, session);
+      if (budget !== undefined) {
+        for (const arm of Object.keys(outcomes) as Arm[]) {
+          const outcome = outcomes[arm];
+          if (outcome?.class !== 'wrong' || outcome.action === undefined) continue;
+          const recorded = { tool: context.step.tool, input: context.step.input };
+          const verdict = await judgeIfOpen(budget, recorded, outcome.action, session);
+          if (verdict !== undefined) outcomes[arm] = { ...outcome, verdict };
+        }
+      }
       const done = Object.values(outcomes);
       tokens += done.reduce((sum, outcome) => sum + outcome.tokens, 0);
       records.push({
@@ -185,6 +244,16 @@ export async function run(argv: readonly string[], overrides: Partial<RunDeps> =
       summaryRan: withSummary,
       kept,
       selection,
+      ...(budget === undefined
+        ? {}
+        : {
+            judge: {
+              tokens: budget.used,
+              tokenCap: judgeCap!,
+              validated: calibration?.passed === true,
+              ...(calibration === undefined ? {} : { calibration }),
+            },
+          }),
     });
     return { code: 0, output: formatReport(report) };
   } finally {

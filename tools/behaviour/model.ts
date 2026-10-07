@@ -209,6 +209,7 @@ export function spawnChild(now: () => number, command = 'claude'): ChildRunner {
     new Promise((resolve) => {
       let settled = false;
       const lines: StreamLine[] = [];
+      const expectsStub = request.args.includes('--mcp-config');
       let buffer = '';
       let timer: NodeJS.Timeout | undefined;
       let halted: ChildResult | undefined;
@@ -222,7 +223,9 @@ export function spawnChild(now: () => number, command = 'claude'): ChildRunner {
         const parts = buffer.split('\n');
         buffer = final ? '' : (parts.pop() ?? '');
         for (const text of parts) if (text.trim() !== '') lines.push({ text, at: now() });
-        if (halted === undefined && stubFailed(parseStream(lines).stubStatus)) {
+        // Only a child started with a stub can fail to have one; a tool-less child (the summary arm,
+        // the judge) lists no servers and must run to its result.
+        if (halted === undefined && expectsStub && stubFailed(parseStream(lines).stubStatus)) {
           halt({ ok: true, lines, code: null });
         }
       };
