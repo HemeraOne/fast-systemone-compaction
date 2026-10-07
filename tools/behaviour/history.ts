@@ -1,6 +1,6 @@
 import { compactByRules } from '../../src/index.js';
 import type { Message, ToolUse } from '../../src/index.js';
-import { candidatesOf } from '../replay/replay.js';
+import { candidatesOf, withoutLineNumbers } from '../replay/replay.js';
 import type { LostPoint } from './select.js';
 
 /** The history the assistant had before the recorded step, uncompacted. */
@@ -109,7 +109,7 @@ function textsOf(messages: readonly Message[]): string[] {
       stringLeaves(use.input, texts);
       if (use.text !== undefined) texts.push(use.text);
     }
-    for (const result of message.toolResults ?? []) texts.push(result.text);
+    for (const result of message.toolResults ?? []) texts.push(result.text, withoutLineNumbers(result.text));
   }
   return texts;
 }
@@ -160,7 +160,7 @@ export function buildLookup(prefix: readonly Message[]): Lookup {
     const written = entry.path === undefined ? undefined : lastWrite.get(entry.path);
     return written === undefined || written < entry.index;
   };
-  const servable = [...entries.values()].filter(current).map((entry) => entry.text);
+  const servable = [...entries.values()].filter(current).flatMap((entry) => [entry.text, withoutLineNumbers(entry.text)]);
 
   return {
     servable,

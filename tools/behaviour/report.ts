@@ -23,6 +23,8 @@ export interface RunInfo {
   /** Why the run ended before the sample was done; `undefined` when it ran to the end. */
   stopped: string | undefined;
   summaryRan: boolean;
+  /** The points are ones where compaction lost nothing, to see whether the model doubts what it kept. */
+  kept?: boolean;
   /** How the points were narrowed (size filter, skip); `undefined` for the default even sample. */
   selection?: string;
 }
@@ -164,7 +166,7 @@ function armLines(summary: ArmSummary): string[] {
 
 const signed = (value: number, digits = 1): string => `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
 
-function comparisonLines(arms: readonly ArmSummary[], paired: Paired, points: readonly PointRecord[]): string[] {
+function comparisonLines(arms: readonly ArmSummary[], paired: Paired, points: readonly PointRecord[], kept: boolean): string[] {
   const control = arms.find((arm) => arm.arm === 'control');
   const compacted = arms.find((arm) => arm.arm === 'compacted');
   if (control === undefined || compacted === undefined) return [];
@@ -189,6 +191,10 @@ function comparisonLines(arms: readonly ArmSummary[], paired: Paired, points: re
           : '';
     lines.push(`  ${c}: compacted ${compactedCount}, control ${controlCount}${excluded} - ${verdict}`);
   }
+  if (kept) {
+    // Nothing was lost at these points, so a lookup before the final action is the model doubting what it was given.
+    lines.push(`  doubt (lookups although nothing was lost): compacted ${compacted.counts.recovered}, control ${control.counts.recovered}`);
+  }
   lines.push(
     paired.medianExtraSeconds === undefined || paired.medianExtraLookups === undefined
       ? '  extra effort: no point reached a final action in both arms, so there is nothing to compare'
@@ -202,9 +208,11 @@ function comparisonLines(arms: readonly ArmSummary[], paired: Paired, points: re
 export function formatReport(summary: Summary): string {
   const { run } = summary;
   const lines = [
-    'Behaviour test: what the assistant does at points where compaction lost a value',
+    run.kept === true
+      ? 'Behaviour test: what the assistant does at points where compaction lost nothing (doubt check)'
+      : 'Behaviour test: what the assistant does at points where compaction lost a value',
     `Model: ${run.model}`,
-    `Corpus: ${run.sessions} sessions, ${run.available} lost points available` +
+    `Corpus: ${run.sessions} sessions, ${run.available} ${run.kept === true ? 'kept' : 'lost'} points available` +
       `${run.skipped > 0 ? ` (${run.skipped} more skipped: one of several parallel calls of its kind)` : ''}, ${run.tried} tried`,
     ...(run.selection === undefined ? [] : [`Selection: ${run.selection}`]),
     `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stopped === undefined ? '' : ` - stopped early (${run.tried} point(s) done): ${run.stopped}`}`,
@@ -212,7 +220,7 @@ export function formatReport(summary: Summary): string {
   ];
   for (const arm of summary.arms) lines.push(...armLines(arm), '');
   if (!run.summaryRan) lines.push('Summary arm not run (pass --summary to add an approximate one)', '');
-  lines.push(...comparisonLines(summary.arms, summary.paired, summary.points), '', 'Points');
+  lines.push(...comparisonLines(summary.arms, summary.paired, summary.points, run.kept === true), '', 'Points');
   for (const point of summary.points) {
     const results = summary.arms.map((arm) => `${arm.arm}=${point.outcomes[arm.arm]?.class ?? '-'}`).join(' ');
     lines.push(

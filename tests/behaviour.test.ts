@@ -20,7 +20,7 @@ import type { ChildRequest, ChildResult, ChildRunner, Scratch, StreamLine } from
 import { formatReport, summarize } from '../tools/behaviour/report.js';
 import type { PointRecord, RunInfo } from '../tools/behaviour/report.js';
 import { run } from '../tools/behaviour/run.js';
-import { choose, lostPoints, sample } from '../tools/behaviour/select.js';
+import { choose, keptPoints, lostPoints, sample } from '../tools/behaviour/select.js';
 import type { LostPoint } from '../tools/behaviour/select.js';
 import { runPoint, runText } from '../tools/behaviour/session.js';
 import type { Outcome, SessionDeps } from '../tools/behaviour/session.js';
@@ -74,6 +74,19 @@ const unreachableSession = (): Message[] =>
       ...pair('Write', { file_path: 'src/legacy.ts', content: 'rewritten' }, 'ok'),
     ],
     editing(VALUE, 'src/elsewhere.ts'),
+  );
+
+/**
+ * The edit target sits in a small Read result that compaction keeps verbatim, so nothing is
+ * lost; a big unrelated result gives the session the reduction the replay requires.
+ */
+const keptSession = (): Message[] =>
+  session(
+    [
+      ...pair('Read', { file_path: 'src/other.ts' }, 'c'.repeat(20_000)),
+      ...pair('Read', { file_path: 'src/billing.ts' }, around(100, VALUE, 100)),
+    ],
+    editing(VALUE),
   );
 
 function toJsonl(messages: readonly Message[]): string {
@@ -226,6 +239,16 @@ describe('selection', () => {
     expect(lostPoints(corpus({ 'p/q.jsonl': quiet })).points).toEqual([]);
   });
 
+  it('selects kept points apart from lost ones, and only edit and command steps that needed an earlier value', () => {
+    const quiet = session([], { tool: 'Read', input: { file_path: 'src/billing.ts' } });
+    const root = corpus({ 'p/k.jsonl': keptSession(), 'p/l.jsonl': reachableSession(), 'p/q.jsonl': quiet });
+    expect(keptPoints(root).points.map((p) => [p.session, p.losses.length])).toEqual([['k.jsonl', 0]]);
+    // A Read step is left out: a re-read there is the final action, so doubt could not show.
+    const reading = session(pair('Read', { file_path: 'src/billing.ts' }, around(100, VALUE, 100)), { tool: 'Read', input: { file_path: 'src/billing.ts' } });
+    expect(keptPoints(corpus({ 'p/r.jsonl': [...pair('Read', { file_path: 'src/other.ts' }, 'c'.repeat(20_000)), ...reading] })).points).toEqual([]);
+    expect(lostPoints(root).points.map((p) => p.session)).toEqual(['l.jsonl']);
+  });
+
   it('continues in order after the skipped points when asked to skip, whatever the count', () => {
     const items = Array.from({ length: 10 }, (_, i) => i);
     expect(choose(items, 3, 4)).toEqual([4, 5, 6]);
@@ -365,6 +388,16 @@ describe('lookups', () => {
 describe('matchesRecorded', () => {
   const step = (tool: string, input: Record<string, unknown>): ToolUse => ({ tool_use_id: 'rec', tool, input });
   const prefix = [chat('user', `see ${around(10, VALUE, 10)}`)];
+
+  it('matches an edit whose target spans lines when the earlier Read result is numbered', () => {
+    const target = 'first line of the target\n    second line of the target';
+    const numbered = ['src/billing.ts', '10\tfirst line of the target', '11\t    second line of the target'].join('\n');
+    const read = pair('Read', { file_path: 'src/billing.ts' }, numbered);
+    const recorded = step('Edit', { file_path: 'src/billing.ts', old_string: target, new_string: 'a' });
+    const proposed = { tool: 'Edit', input: { file_path: 'src/billing.ts', old_string: target, new_string: 'b' } };
+    expect(matchesRecorded(proposed, recorded, read)).toBe(true);
+    expect(matchesRecorded({ ...proposed, input: { ...proposed.input, old_string: 'not in the file\nat all' } }, recorded, read)).toBe(false);
+  });
 
   it('matches a path after slash normalisation and the same tool family', () => {
     const recorded = step('Read', { file_path: 'src/billing.ts' });
@@ -740,6 +773,12 @@ describe('report', () => {
     expect(text).toContain('recovered: median 3 extra lookups, 4.0 s to the final action');
   });
 
+  it('shows the doubt line only for kept points', () => {
+    const records = [record(outcome('same'), outcome('recovered', 1, 2))];
+    expect(formatReport(summarize(records, info({ kept: true })))).toContain('doubt (lookups although nothing was lost): compacted 1, control 0');
+    expect(formatReport(summarize(records, info()))).not.toContain('doubt');
+  });
+
   it('lists the fixed reasons of failed runs per arm, and why the run stopped', () => {
     const text = formatReport(
       summarize(
@@ -917,6 +956,28 @@ describe('run', () => {
     expect(empty.output).toContain('No lost point');
     expect(model.impl).not.toHaveBeenCalled();
     expect(scratch).not.toHaveBeenCalled();
+  });
+
+  it('with --kept runs on points where nothing was lost and reports doubt', async () => {
+    const root = corpus({ 'p/k.jsonl': keptSession(), 'p/l.jsonl': reachableSession() });
+    // The control edits at once; the compacted arm looks the file up first.
+    const model = fakeRunner((_request, count) =>
+      ok(stream({ calls: count % 2 === 1 ? [edit(VALUE)] : [call('Read', { file_path: 'src/billing.ts' }), edit(VALUE)] })),
+    );
+    const result = await runWith([...ARGS, '--root', root, '--kept'], model.runner);
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('where compaction lost nothing');
+    expect(result.output).toContain('1 kept points available');
+    expect(result.output).toContain('doubt (lookups although nothing was lost): compacted 1, control 0');
+    expect(model.requests).toHaveLength(2);
+  });
+
+  it('refuses a corpus with no kept point with --kept, starting nothing', async () => {
+    const model = scripted([]);
+    const result = await runWith([...ARGS, '--root', corpus({ 'p/l.jsonl': reachableSession() }), '--kept'], model.runner);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('No kept point');
+    expect(model.impl).not.toHaveBeenCalled();
   });
 
   it('refuses arguments that are not positive whole numbers', async () => {

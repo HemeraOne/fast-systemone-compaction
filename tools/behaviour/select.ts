@@ -6,7 +6,7 @@ import { replaySession } from '../replay/replay.js';
 import type { Loss } from '../replay/replay.js';
 import { parseTranscript } from '../replay/transcript.js';
 
-/** A checked replay point with at least one loss, with the session it came from. */
+/** A checked replay point with the session it came from; `losses` is empty for a kept point. */
 export interface LostPoint {
   session: string;
   /** Full path of the session file; only the stub reads it. */
@@ -39,6 +39,19 @@ function sessionFiles(root: string): string[] {
  * answer as wrong even with the full history.
  */
 export function lostPoints(root: string): { points: LostPoint[]; sessions: number; skipped: number } {
+  return collect(root, true);
+}
+
+/**
+ * The checked edit and command points that needed an earlier value and lost none: the model has
+ * all it needs, so a lookup there is doubt. A Read step is left out: a re-read of the file there
+ * is the final action itself, so doubt would not show.
+ */
+export function keptPoints(root: string): { points: LostPoint[]; sessions: number; skipped: number } {
+  return collect(root, false);
+}
+
+function collect(root: string, lost: boolean): { points: LostPoint[]; sessions: number; skipped: number } {
   const points: LostPoint[] = [];
   let sessions = 0;
   let skipped = 0;
@@ -54,7 +67,7 @@ export function lostPoints(root: string): { points: LostPoint[]; sessions: numbe
     sessions++;
     const session = path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
     for (const point of replaySession(session, messages).points) {
-      if (point.status !== 'checked' || point.losses.length === 0) continue;
+      if (point.status !== 'checked' || (point.losses.length > 0) !== lost || (!lost && (point.needed === 0 || familyOf(point.tool) === 'read'))) continue;
       const siblings = messages[point.messageIndex]?.toolUses.some(
         (use) => use.tool_use_id !== point.toolUseId && familyOf(use.tool) === familyOf(point.tool),
       );
