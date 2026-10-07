@@ -7,6 +7,14 @@ import { MAX_LOOKUPS } from './stub.js';
 
 export type Arm = 'control' | 'compacted' | 'summary';
 
+/** A tool call: the final action of an arm, or the recorded step it is compared with. */
+export interface Action {
+  tool: string;
+  input: Record<string, unknown>;
+}
+
+export type JudgeVerdict = 'equivalent' | 'different' | 'undecided';
+
 export type OutcomeClass = 'same' | 'recovered' | 'wrong' | 'gave-up' | 'unreachable' | 'failed';
 
 export interface Outcome {
@@ -24,6 +32,10 @@ export interface Outcome {
   reason?: string;
   /** The child reported no usage, so the cap cannot be enforced past this point. */
   unmetered?: boolean;
+  /** The call that ended a `wrong` outcome. Kept in memory for the judge, never printed. */
+  action?: Action;
+  /** The judge's verdict on a `wrong` outcome; absent when the judge is off or the cap stopped it. */
+  verdict?: JudgeVerdict;
 }
 
 export interface SessionDeps {
@@ -86,7 +98,8 @@ export async function runPoint(
   for (const call of stream.calls) {
     if (familyOf(call.tool) === familyOf(context.step.tool)) {
       if (matchesRecorded(call, context.step, context.prefix)) return outcome(lookups === 0 ? 'same' : 'recovered', lookups, call.at);
-      return outcome(context.reachable ? 'wrong' : 'unreachable', lookups, call.at);
+      if (!context.reachable) return outcome('unreachable', lookups, call.at);
+      return { ...outcome('wrong', lookups, call.at), action: { tool: call.tool, input: call.input } };
     }
     lookups++;
     if (lookups > MAX_LOOKUPS) return gaveUp(lookups, call.at, 'lookup limit');

@@ -260,6 +260,26 @@ prints what the child itself reported, which is safe because the prompt is
 synthetic), so run it before a real point, which costs about 250k tokens per arm. `-- --kept` runs the same two arms on edit and command points where compaction lost nothing instead (a `Read` step is left out, since a re-read there is the final action), and the report adds a `doubt` line: how often each arm looked something up although it already had every value it needed, which shows whether the compacted history (with its notes where calls were left out) makes the model distrust what it kept. The code lives in `tools/behaviour/`, not in the plugin or the
 published package.
 
+**Judge (optional).** The match above is mechanical, so a `wrong` can be an
+action that would do the same job (another spelling of a command or path).
+`-- --judge --judge-token-cap <n>` adds a second opinion on the `wrong` results
+only: a tool-less child on your login sees the two actions (the recorded step
+and the arm's final call, no history) and answers `equivalent`, `different`, or
+`undecided`. The report keeps every count above unchanged and adds a `judge (...)`
+line per arm. The judge has its own token cap (it stops starting calls once the
+tokens the CLI reports reach it), judges each pair once (a repeat run can
+differ), and sends those two actions to the model provider.
+`-- --calibrate <file> --model <id> --judge-token-cap <n>` grades a file of
+labelled pairs, a JSON array of
+`{ "recorded": { tool, input }, "action": { tool, input }, "label": "equivalent" | "different" }`
+with at least 20 pairs (keep it private if it comes from your sessions), and
+prints `correct/total` against a 90% bar. Given together with `--judge`, it runs
+first, and the judge columns carry a "not validated" notice unless it passed. The
+90% bar and the 20-pair minimum are starting values, not statistics. The judge is
+asked exactly this, and these are the definitions of the verdicts:
+
+> Two tool calls follow. The first is what an assistant really did next in a coding session (the recorded step). The second is what an assistant did when given a shortened history. Decide whether the second call would do the same job as the first. Answer "equivalent" if it would reach the same result (for example a command spelled differently, a path written another way, or an edit that replaces a different span of the same text with the same effect). Answer "different" if it would act on another file, run another command, or change something else. Answer with exactly one word: equivalent or different.
+
 ## Animated demo (macOS)
 
 `demo/JevDemo` is a small native SwiftUI app that plays a scripted, dramatized

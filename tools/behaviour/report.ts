@@ -1,4 +1,5 @@
 import type { Rule, ValueKind } from '../replay/replay.js';
+import type { CalibrationResult } from './judge.js';
 import type { Arm, Outcome, OutcomeClass } from './session.js';
 
 /** One lost point and what each arm did. Identifiers and positions only, never text. */
@@ -27,6 +28,17 @@ export interface RunInfo {
   kept?: boolean;
   /** How the points were narrowed (size filter, skip); `undefined` for the default even sample. */
   selection?: string;
+  /** Present only when the judge ran (spec 006); its absence keeps the spec 005 report unchanged. */
+  judge?: { tokens: number; tokenCap: number; validated: boolean; calibration?: CalibrationResult };
+}
+
+/** What the judge said about one arm's `wrong` results; the four counts add up to `wrong`. */
+export interface ArmJudgeSummary {
+  wrong: number;
+  equivalent: number;
+  different: number;
+  undecided: number;
+  unjudged: number;
 }
 
 export interface ArmSummary {
@@ -47,6 +59,8 @@ export interface ArmSummary {
   /** Outcomes that reached a final action, and the median time to it. */
   finals: number;
   medianFinalSeconds: number | undefined;
+  /** Only when the judge ran. */
+  judge?: ArmJudgeSummary;
 }
 
 /** Compacted against control over the points where both arms reached a final action. */
@@ -99,6 +113,18 @@ function reasons(outcomes: readonly Outcome[], cls: OutcomeClass): string[] {
   return [...counts].map(([label, n]) => `${label} x${n}`);
 }
 
+function judgeCounts(outcomes: readonly Outcome[]): ArmJudgeSummary {
+  const wrong = outcomes.filter((outcome) => outcome.class === 'wrong');
+  const verdicts = (name: string): number => wrong.filter((outcome) => outcome.verdict === name).length;
+  return {
+    wrong: wrong.length,
+    equivalent: verdicts('equivalent'),
+    different: verdicts('different'),
+    undecided: verdicts('undecided'),
+    unjudged: wrong.filter((outcome) => outcome.verdict === undefined).length,
+  };
+}
+
 export function summarize(points: readonly PointRecord[], run: RunInfo): Summary {
   const arms: Arm[] = run.summaryRan ? ['control', 'compacted', 'summary'] : ['control', 'compacted'];
   const pairs = points.flatMap((point) => {
@@ -132,6 +158,7 @@ export function summarize(points: readonly PointRecord[], run: RunInfo): Summary
         recoveredUnanswered: toolCounts(recovered.flatMap((outcome) => outcome.unanswered ?? [])),
         finals: finals.length,
         medianFinalSeconds: median(finals.map((outcome) => outcome.seconds)),
+        ...(run.judge === undefined ? {} : { judge: judgeCounts(outcomes) }),
       };
     }),
   };
@@ -161,8 +188,21 @@ function armLines(summary: ArmSummary): string[] {
     );
   }
   if (summary.failures.length > 0) lines.push(`  failed to run: ${summary.failures.join(', ')}`);
+  if (summary.judge !== undefined) {
+    const { wrong, equivalent, different, undecided, unjudged } = summary.judge;
+    lines.push(`  judge (wrong results: ${wrong}): equivalent ${equivalent}, different ${different}, undecided ${undecided}, unjudged ${unjudged}`);
+  }
   return lines;
 }
+
+/** The calibration result as one line; the set's content is never part of it. */
+export function calibrationLine(result: CalibrationResult): string {
+  const base = `Calibration: ${result.correct}/${result.total} correct (${Math.round(result.rate * 100)}%), bar ${Math.round(result.bar * 100)}% over at least ${result.minimum} pairs`;
+  if (result.total < result.minimum) return `${base}: only ${result.total} pairs, at least ${result.minimum} needed: not passed`;
+  return `${base}: ${result.passed ? 'passed' : 'not passed'}`;
+}
+
+const NOT_VALIDATED = 'Judge: not validated (calibration did not pass in this invocation)';
 
 const signed = (value: number, digits = 1): string => `${value > 0 ? '+' : ''}${value.toFixed(digits)}`;
 
@@ -216,6 +256,13 @@ export function formatReport(summary: Summary): string {
       `${run.skipped > 0 ? ` (${run.skipped} more skipped: one of several parallel calls of its kind)` : ''}, ${run.tried} tried`,
     ...(run.selection === undefined ? [] : [`Selection: ${run.selection}`]),
     `Tokens: ${run.tokens} used, cap ${run.tokenCap}${run.stopped === undefined ? '' : ` - stopped early (${run.tried} point(s) done): ${run.stopped}`}`,
+    ...(run.judge === undefined
+      ? []
+      : [
+          ...(run.judge.calibration === undefined ? [] : [calibrationLine(run.judge.calibration)]),
+          ...(run.judge.validated ? [] : [NOT_VALIDATED]),
+          `Judge tokens: ${run.judge.tokens} used, cap ${run.judge.tokenCap}; each pair is judged once, so a repeat run can differ`,
+        ]),
     '',
   ];
   for (const arm of summary.arms) lines.push(...armLines(arm), '');
