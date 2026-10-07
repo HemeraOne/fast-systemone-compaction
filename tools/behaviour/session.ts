@@ -90,7 +90,7 @@ export async function runPoint(
     }
     lookups++;
     if (lookups > MAX_LOOKUPS) return gaveUp(lookups, call.at, 'lookup limit');
-    if (context.lookup.serve({ tool: call.tool, input: call.input }) === undefined) unanswered.push(call.tool);
+    if (context.lookup.serve({ tool: call.tool, input: call.input }) === undefined) unanswered.push(context.lookup.miss({ tool: call.tool, input: call.input }));
   }
   if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
   if (stream.isError) return failed('error result');
