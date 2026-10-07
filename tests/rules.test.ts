@@ -476,6 +476,21 @@ describe('rule 1: reads of files edited later', () => {
     expect(out.stats.resultsDropped).toBe(2);
   });
 
+  it('keeps a read result of up to 8000 characters whole and shortens one of 8001', () => {
+    const out = compactByRules(
+      session([...read('fits', 'a.ts', 'x'.repeat(8000)), ...read('over', 'b.ts', 'y'.repeat(8001))]),
+      OPTIONS,
+    );
+    expect(resultText(out.messages, 'fits')).toBe('x'.repeat(8000));
+    expect(resultText(out.messages, 'over')).toContain('truncated 7701 chars');
+    expect(out.stats.resultsDropped).toBe(1);
+  });
+
+  it('shortens a large result of another tool even when it is under the read limit', () => {
+    const out = compactByRules(session(pair('b', 'Bash', { command: 'cat f.ts' }, 'x'.repeat(5000))), OPTIONS);
+    expect(resultText(out.messages, 'b')).toContain('truncated 4700 chars');
+  });
+
   it('removes a read that edits followed once a later full read arrives', () => {
     const out = compactByRules(
       session([...read('r', 'f.ts', big), ...edit('e', 'f.ts'), ...read('r2', 'f.ts', 'new')]),
