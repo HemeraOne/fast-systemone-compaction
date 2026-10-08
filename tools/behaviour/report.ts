@@ -1,6 +1,7 @@
 import type { Rule, ValueKind } from '../replay/replay.js';
 import type { CalibrationResult } from './judge.js';
 import type { Arm, Outcome, OutcomeClass } from './session.js';
+import { MAX_LOOKUPS } from './stub.js';
 
 /** One lost point and what each arm did. Identifiers and positions only, never text. */
 export interface PointRecord {
@@ -56,6 +57,8 @@ export interface ArmSummary {
   harnessLimited: number;
   /** Tools of the lookups the stub could not answer in `recovered` outcomes, e.g. `Bash x2`; empty when none. */
   recoveredUnanswered: string;
+  /** The lookups the stub checked, by how they were answered; `causes` names the unanswerable ones, e.g. `Grep (never read) x2`. */
+  lookups: { exact: number; derived: number; unanswerable: number; causes: string };
   /** Outcomes that reached a final action, and the median time to it. */
   finals: number;
   medianFinalSeconds: number | undefined;
@@ -113,6 +116,21 @@ function reasons(outcomes: readonly Outcome[], cls: OutcomeClass): string[] {
   return [...counts].map(([label, n]) => `${label} x${n}`);
 }
 
+/** The cause shown for an unanswerable lookup: a bare tool name is a form the recorded text cannot answer. */
+const causeOf = (label: string): string => (label.includes(' (') ? label : `${label} (unsupported)`);
+
+function lookupCounts(outcomes: readonly Outcome[]): ArmSummary['lookups'] {
+  const checked = outcomes.reduce((sum, outcome) => sum + Math.min(outcome.lookups, MAX_LOOKUPS), 0);
+  const unanswered = outcomes.flatMap((outcome) => outcome.unanswered ?? []);
+  const derived = outcomes.reduce((sum, outcome) => sum + (outcome.derived ?? 0), 0);
+  return {
+    exact: Math.max(0, checked - derived - unanswered.length),
+    derived,
+    unanswerable: unanswered.length,
+    causes: toolCounts(unanswered.map(causeOf)),
+  };
+}
+
 function judgeCounts(outcomes: readonly Outcome[]): ArmJudgeSummary {
   const wrong = outcomes.filter((outcome) => outcome.class === 'wrong');
   const verdicts = (name: string): number => wrong.filter((outcome) => outcome.verdict === name).length;
@@ -156,6 +174,7 @@ export function summarize(points: readonly PointRecord[], run: RunInfo): Summary
         gaveUp: reasons(outcomes, 'gave-up'),
         harnessLimited: outcomes.filter((outcome) => outcome.class === 'gave-up' && outcome.harnessLimited === true).length,
         recoveredUnanswered: toolCounts(recovered.flatMap((outcome) => outcome.unanswered ?? [])),
+        lookups: lookupCounts(outcomes),
         finals: finals.length,
         medianFinalSeconds: median(finals.map((outcome) => outcome.seconds)),
         ...(run.judge === undefined ? {} : { judge: judgeCounts(outcomes) }),
@@ -178,6 +197,8 @@ function armLines(summary: ArmSummary): string[] {
   if (summary.harnessLimited > 0) {
     lines.push(`  harness-limited: ${summary.harnessLimited} of the gave-up (the stub answered none of their lookups)`);
   }
+  const { exact, derived, unanswerable, causes } = summary.lookups;
+  lines.push(`  lookups: ${exact} exact repeat, ${derived} derived, ${unanswerable} unanswerable${causes === '' ? '' : ` (${causes})`}`);
   if (summary.medianFinalSeconds !== undefined) {
     lines.push(`  time to final action: median ${summary.medianFinalSeconds.toFixed(1)} s over ${summary.finals} outcome(s)`);
   }
@@ -279,9 +300,10 @@ export function formatReport(summary: Summary): string {
     '',
     'Caveats: a stand-in system prompt and five stub tools replace Claude Code\'s own, and the history',
     'reaches the model as text rather than as real tool turns, so rates are not the real app\'s;',
-    'lookups are answered only for exact repeats (Read matches on path), so a recovery by another',
-    'command or pattern counts as not available; with this few points, read the counts, not the',
-    'percentages.',
+    'lookups are answered as recorded for exact repeats (a Read matches on path) and, for a Grep or a',
+    'cat/head/tail over a file a complete Read recorded, derived from that text (counted apart as',
+    'derived); any other lookup counts as not available, so a recovery by another command or pattern',
+    'may be missed; with this few points, read the counts, not the percentages.',
   );
   return lines.join('\n');
 }

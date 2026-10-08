@@ -76,6 +76,16 @@ const unreachableSession = (): Message[] =>
     editing(VALUE, 'src/elsewhere.ts'),
   );
 
+/** As `reachableSession`, plus a complete Read of a small file that a Grep or `cat` can be derived from. */
+const derivedSession = (): Message[] =>
+  session(
+    [
+      ...pair('Read', { file_path: 'src/billing.ts' }, around(5000, VALUE, 5000)),
+      ...pair('Read', { file_path: 'src/util.ts' }, '     1→const a = 1;\n     2→const b = 2;'),
+    ],
+    editing(VALUE),
+  );
+
 /**
  * The edit target sits in a small Read result that compaction keeps verbatim, so nothing is
  * lost; a big unrelated result gives the session the reduction the replay requires.
@@ -631,6 +641,34 @@ describe('runPoint', () => {
     });
   });
 
+  it('counts a lookup computed from recorded file content as derived, and labels the others it could not answer', async () => {
+    const { point, context } = setup(derivedSession());
+    const lookups = [
+      call('Grep', { pattern: 'const b', path: 'src/util.ts', output_mode: 'content' }),
+      call('Read', { file_path: 'src/billing.ts' }),
+      call('Bash', { command: 'ls' }),
+      call('Grep', { pattern: 'x', path: 'src/never.ts', output_mode: 'content' }),
+    ];
+    const model = scripted([ok(stream({ calls: [...lookups, edit(VALUE)] }))]);
+    expect(await runPoint(point, context, 'p', deps(model.runner))).toMatchObject({
+      class: 'recovered',
+      lookups: 4,
+      derived: 1,
+      unanswered: ['Bash', 'Grep (never read)'],
+    });
+  });
+
+  it('is not harness-limited when the stub derived an answer, and leaves `derived` out when it derived none', async () => {
+    const { point, context } = setup(derivedSession());
+    const onlyDerived = stream({ calls: [call('Grep', { pattern: 'const b', path: 'src/util.ts', output_mode: 'content' })] });
+    const gaveUp = await runPoint(point, context, 'p', deps(scripted([ok(onlyDerived)]).runner));
+    expect(gaveUp).toMatchObject({ class: 'gave-up', lookups: 1, derived: 1 });
+    expect(gaveUp).not.toHaveProperty('harnessLimited');
+    expect(gaveUp).not.toHaveProperty('unanswered');
+    const none = await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [call('Read', { file_path: 'src/billing.ts' }), edit(VALUE)] }))]).runner));
+    expect(none).not.toHaveProperty('derived');
+  });
+
   it('wrong: a call that is not the recorded step on a reachable point', async () => {
     const { point, context } = setup(reachableSession());
     const outcome = await runPoint(point, context, 'p', deps(scripted([ok(stream({ calls: [edit('something unrelated')] }))]).runner));
@@ -858,6 +896,41 @@ describe('report', () => {
     );
     expect(text).toMatch(/gave-up\s+2\/2 \(100%\) - no final action \(3 lookups, 2 unanswerable: Bash, Grep\) x2/);
     expect(text).toContain('recovered: median 2 extra lookups, 2.0 s to the final action; unanswerable lookups: Bash x2');
+  });
+
+  it('splits the checked lookups per arm into exact repeats, derived answers and unanswerable ones, with causes', () => {
+    const mixed: Outcome = { ...outcome('recovered', 4, 2, undefined, ['Bash', 'Grep (never read)']), derived: 1 };
+    const repeats = outcome('recovered', 2, 2);
+    const text = formatReport(summarize([record(repeats, mixed)], info()));
+    expect(text).toContain('lookups: 2 exact repeat, 0 derived, 0 unanswerable\n');
+    expect(text).toContain('lookups: 1 exact repeat, 1 derived, 2 unanswerable (Bash (unsupported), Grep (never read))');
+    const limited = outcome('gave-up', 6, 1, 'lookup limit', ['Grep', 'Grep', 'Grep', 'Grep', 'Grep']);
+    expect(formatReport(summarize([record(limited, repeats)], info()))).toContain('lookups: 0 exact repeat, 0 derived, 5 unanswerable (Grep (unsupported) x5)');
+    expect(formatReport(summarize([record(outcome('failed', 0, 1, 'timeout'), repeats)], info()))).toContain('lookups: 0 exact repeat, 0 derived, 0 unanswerable');
+  });
+
+  it('adds only the lookups line to a report of exact repeats, and the line carries no transcript text', async () => {
+    const records = [record(outcome('same'), outcome('recovered', 2, 3))];
+    const lines = formatReport(summarize(records, info())).split('\n');
+    expect(lines.filter((line) => line.includes('lookups:'))).toEqual([
+      '  lookups: 0 exact repeat, 0 derived, 0 unanswerable',
+      '  lookups: 2 exact repeat, 0 derived, 0 unanswerable',
+    ]);
+
+    const secret = 'SECRET-TOKEN';
+    const prefix = [
+      ...pair('Read', { file_path: `src/${secret}.ts` }, `     1→const ${secret} = 1;`),
+      chat('user', 'go'),
+    ];
+    const lookup = buildLookup(prefix);
+    const answers = [
+      lookup.answer({ tool: 'Grep', input: { pattern: secret, path: `src/${secret}.ts`, output_mode: 'content' } }),
+      lookup.answer({ tool: 'Bash', input: { command: `cat src/${secret}.ts` } }),
+      lookup.answer({ tool: 'Grep', input: { pattern: secret, path: `src/other-${secret}.ts` } }),
+    ];
+    expect(answers.map((answer) => answer.kind)).toEqual(['derived', 'derived', 'miss']);
+    const mixed: Outcome = { ...outcome('recovered', 3, 2, undefined, answers.flatMap((a) => (a.kind === 'miss' ? [a.label] : []))), derived: 2 };
+    expect(formatReport(summarize([record(outcome('same'), mixed)], info()))).not.toContain(secret);
   });
 
   it('shows the time to a final action per arm and the paired extra effort of compacted over control', () => {
