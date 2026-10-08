@@ -21,8 +21,10 @@ export interface Outcome {
   class: OutcomeClass;
   /** Lookups issued before the terminal action, answerable or not. */
   lookups: number;
-  /** Tool names of the lookups the stub could not answer (not a repeat of recorded history); absent when none. */
+  /** Labels of the lookups the stub could not answer: the tool name, with a cause for a Read or a file lookup; absent when none. */
   unanswered?: string[];
+  /** How many of the counted lookups were computed from recorded file content rather than repeated; absent when none. */
+  derived?: number;
   seconds: number;
   /** Tokens the child reported (input, output, cache). */
   tokens: number;
@@ -74,10 +76,12 @@ export async function runPoint(
   const unmetered = stream.tokens === undefined;
   const lastAt = child.lines[child.lines.length - 1]?.at ?? started;
   const unanswered: string[] = [];
+  let derived = 0;
   const outcome = (cls: OutcomeClass, lookups: number, at: number): Outcome => ({
     class: cls,
     lookups,
     ...(unanswered.length > 0 ? { unanswered } : {}),
+    ...(derived > 0 ? { derived } : {}),
     seconds: seconds(at),
     tokens,
     ...(unmetered ? { unmetered } : {}),
@@ -103,7 +107,9 @@ export async function runPoint(
     }
     lookups++;
     if (lookups > MAX_LOOKUPS) return gaveUp(lookups, call.at, 'lookup limit');
-    if (context.lookup.serve({ tool: call.tool, input: call.input }) === undefined) unanswered.push(context.lookup.miss({ tool: call.tool, input: call.input }));
+    const answer = context.lookup.answer({ tool: call.tool, input: call.input });
+    if (answer.kind === 'miss') unanswered.push(answer.label);
+    else if (answer.kind === 'derived') derived++;
   }
   if (!stream.sawResult) return failed(child.code === 0 ? 'no result' : `exit ${child.code ?? 'signal'}`);
   if (stream.isError) return failed('error result');

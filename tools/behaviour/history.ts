@@ -1,6 +1,7 @@
 import { compactByRules } from '../../src/index.js';
 import type { Message, ToolUse } from '../../src/index.js';
 import { candidatesOf, withoutLineNumbers } from '../replay/replay.js';
+import { deriveGrep, fileShowing, recordedFiles, respelled, slashed, UNSUPPORTED } from './derive.js';
 import type { LostPoint } from './select.js';
 
 /** The history the assistant had before the recorded step, uncompacted. */
@@ -86,9 +87,6 @@ export function familyOf(tool: string): string | undefined {
 
 const WRITING_TOOLS = new Set(['Edit', 'MultiEdit', 'Write']);
 
-const slashed = (value: unknown): string | undefined =>
-  typeof value === 'string' ? value.replace(/\\/g, '/') : undefined;
-
 const collapsed = (value: unknown): string | undefined =>
   typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : undefined;
 
@@ -131,20 +129,21 @@ function lookupKey(tool: string, input: Record<string, unknown>): string | undef
   return undefined;
 }
 
-/** What the stub tools can answer: recorded results of the uncompacted prefix (research R4). */
-export interface Lookup {
-  /** The recorded result for the call, or `undefined` when the test cannot answer it. */
-  serve(call: ToolCallRequest): string | undefined;
-  /** Every result `serve` could return. */
-  servable: readonly string[];
-  /** The label for a call `serve` cannot answer: the tool name, with a reason for a Read. */
-  miss(call: ToolCallRequest): string;
-}
+/** How a lookup was answered: as recorded, computed from recorded file content, or not at all. */
+export type Answer =
+  | { kind: 'repeat' | 'derived'; text: string }
+  | { kind: 'miss'; label: string };
 
-/** Whether two paths differ only in case, a drive prefix or a relative-versus-absolute spelling. */
-function respelled(a: string, b: string): boolean {
-  const [x, y] = [a.toLowerCase().replace(/^\.\//, ''), b.toLowerCase().replace(/^\.\//, '')];
-  return x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`);
+/** What the stub tools can answer: recorded results of the uncompacted prefix (research R4), plus derived answers (spec 007). */
+export interface Lookup {
+  /** How the call is answered: an exact repeat first, then a derivation, else a miss with its label. */
+  answer(call: ToolCallRequest): Answer;
+  /** The answer's text, or `undefined` when the test cannot answer the call. */
+  serve(call: ToolCallRequest): string | undefined;
+  /** Every result `serve` could return for an exact repeat. */
+  servable: readonly string[];
+  /** The label for a call `serve` cannot answer: the tool name, with a cause for a Read and for a file lookup. */
+  miss(call: ToolCallRequest): string;
 }
 
 export function buildLookup(prefix: readonly Message[]): Lookup {
@@ -170,20 +169,46 @@ export function buildLookup(prefix: readonly Message[]): Lookup {
   };
   const servable = [...entries.values()].filter(current).flatMap((entry) => [entry.text, withoutLineNumbers(entry.text)]);
 
+  const files = recordedFiles(prefix);
+  const repeat = (call: ToolCallRequest): string | undefined => {
+    const key = lookupKey(call.tool, call.input);
+    const entry = key === undefined ? undefined : entries.get(key);
+    return entry !== undefined && current(entry) ? entry.text : undefined;
+  };
+  const derived = (call: ToolCallRequest): Answer => {
+    const grep = call.tool === 'Grep';
+    const showing = call.tool === 'Bash' && typeof call.input['command'] === 'string' ? fileShowing(call.input['command']) : undefined;
+    const path = grep ? slashed(call.input['path']) : showing === undefined ? undefined : slashed(showing.path);
+    if (path === undefined) return { kind: 'miss', label: call.tool };
+    const file = files(path);
+    if ('cause' in file) return { kind: 'miss', label: `${call.tool} (${file.cause})` };
+    const text = grep ? deriveGrep(file.lines, call.input, path) : showing!.show(file.lines);
+    return text === UNSUPPORTED ? { kind: 'miss', label: call.tool } : { kind: 'derived', text };
+  };
+  const readMiss = (call: ToolCallRequest): string => {
+    const path = slashed(call.input['file_path']);
+    const key = lookupKey(call.tool, call.input);
+    if (key !== undefined && entries.has(key)) return 'Read (stale)';
+    const recorded = [...entries.values()].some((entry) => path !== undefined && entry.path !== undefined && respelled(path, entry.path));
+    return recorded ? 'Read (respelled)' : 'Read (never read)';
+  };
+  const answer = (call: ToolCallRequest): Answer => {
+    const text = repeat(call);
+    if (text !== undefined) return { kind: 'repeat', text };
+    if (call.tool === 'Grep' || call.tool === 'Bash') return derived(call);
+    return { kind: 'miss', label: call.tool === 'Read' ? readMiss(call) : call.tool };
+  };
+
   return {
     servable,
+    answer,
     serve(call) {
-      const key = lookupKey(call.tool, call.input);
-      const entry = key === undefined ? undefined : entries.get(key);
-      return entry !== undefined && current(entry) ? entry.text : undefined;
+      const result = answer(call);
+      return result.kind === 'miss' ? undefined : result.text;
     },
     miss(call) {
-      if (call.tool !== 'Read') return call.tool;
-      const path = slashed(call.input['file_path']);
-      const key = lookupKey(call.tool, call.input);
-      if (key !== undefined && entries.has(key)) return 'Read (stale)';
-      const recorded = [...entries.values()].some((entry) => path !== undefined && entry.path !== undefined && respelled(path, entry.path));
-      return recorded ? 'Read (respelled)' : 'Read (never read)';
+      const result = answer(call);
+      return result.kind === 'miss' ? result.label : call.tool;
     },
   };
 }

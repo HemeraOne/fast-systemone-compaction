@@ -250,8 +250,12 @@ scratch directory that is removed at the end. `-- --summary` adds an approximate
 third arm built from a model-written summary; it does not re-attach recently
 read files as the built-in summary does. Caveats: the history reaches the model
 as text rather than as real tool turns, a stand-in system prompt and tool set
-replace Claude Code's own, lookups match only exact repeats (a `Read` matches on
-path), a point whose recorded step is one of several parallel calls of its kind is
+replace Claude Code's own, lookups are answered as recorded for exact repeats (a
+`Read` matches on path) and, for a `Grep` or a `cat`/`head`/`tail` over one file
+that a complete, still-current `Read` recorded, computed from that text and
+counted apart as `derived` (forms it cannot reproduce exactly, such as a
+directory, a long line or an unusual regex, stay `not available`, with the cause
+named in the per-arm `lookups:` line), a point whose recorded step is one of several parallel calls of its kind is
 skipped and counted, the point count is small, and the CLI details the tool relies on are
 checked only against the real CLI: `-- --check --model <id>` runs one tiny
 synthetic prompt (a few thousand tokens, no session text) through the same child
