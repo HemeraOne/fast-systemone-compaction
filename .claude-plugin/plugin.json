@@ -67,6 +67,28 @@
       "title": "System One model",
       "description": "Model name sent to the configured System One endpoint. Defaults to TypeSafe's jev-latest.",
       "default": "jev-latest"
+    },
+    "fallbackModel": {
+      "type": "string",
+      "title": "Fallback model",
+      "description": "Bigger-context model to retry with when the history does not fit maxStateTokens (e.g. clef when model is clef-flash). Leave unset to fall back to the built-in summary instead."
+    },
+    "fallbackBaseUrl": {
+      "type": "string",
+      "title": "Fallback endpoint",
+      "description": "System One endpoint for the fallback model. Leave unset to reuse baseUrl."
+    },
+    "fallbackMaxStateTokens": {
+      "type": "number",
+      "title": "Fallback state tokens",
+      "description": "State budget for the fallback model.",
+      "default": 55000
+    },
+    "fallbackMaxRequestTokens": {
+      "type": "number",
+      "title": "Fallback request tokens",
+      "description": "State plus questions budget for the fallback model.",
+      "default": 62000
     }
   }
 }

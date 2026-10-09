@@ -123,18 +123,28 @@ This fork also works with Cloudflare's Clef decision models on Workers AI. The p
 Cloudflare's `{ result, success, errors, messages }` response envelope. It also caps each request at
 32 tool calls, because Workers AI accepts at most 64 questions per request.
 
+Hosted clef-flash has a 24k-token window ($0.038/M input). Clef has 64k ($0.24/M). The
+recommended setup sends each compaction to clef-flash first. If the history does not fit
+clef-flash's budget, the plugin retries with Clef. This happens before any request is
+sent, so the failed fit costs nothing.
+
 ```json
 {
   "baseUrl": "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/clef-flash",
   "apiKey": "<Cloudflare API token with Workers AI permission>",
   "model": "clef-flash",
-  "maxStateTokens": 55000,
-  "maxRequestTokens": 62000
+  "maxStateTokens": 19000,
+  "maxRequestTokens": 22000,
+  "fallbackModel": "clef",
+  "fallbackBaseUrl": "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/clef",
+  "fallbackMaxStateTokens": 55000,
+  "fallbackMaxRequestTokens": 62000
 }
 ```
 
-Use `clef` in place of `clef-flash`, in both the URL and `model`, for the larger 27B model.
-Clef's hosted context window is 65,536 tokens.
+Keep the budgets below the hosted windows. Workers AI silently truncates input that is too long,
+and the decisions are then made on a cut-off history. The toast's `[host model]` marker shows
+which model answered.
 
 ## Limitations
 

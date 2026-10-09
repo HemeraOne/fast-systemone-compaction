@@ -536,3 +536,70 @@ describe('register in rules mode', () => {
     expect(rulesEngine.toasts[0]).toMatch(/\d+ results shortened, \d+ reads removed/);
   });
 });
+
+describe('fallback model', () => {
+  it('reads the fallback options', () => {
+    const config = resolveHookConfig({ fallbackModel: 'clef', fallbackBaseUrl: 'https://x.test/clef' });
+    expect(config.fallback).toEqual({
+      model: 'clef',
+      baseUrl: 'https://x.test/clef',
+      maxStateTokens: 55_000,
+      maxRequestTokens: 62_000,
+    });
+    expect(resolveHookConfig({}).fallback).toBeUndefined();
+  });
+
+  it('retries with the fallback model when the history is too large for the primary one', async () => {
+    const bodies: string[] = [];
+    const urls: string[] = [];
+    const config = {
+      ...resolveHookConfig({
+        preserveRecentMessages: 1,
+        maxStateTokens: 1,
+        baseUrl: 'https://x.test/flash',
+        model: 'clef-flash',
+        fallbackModel: 'clef',
+        fallbackBaseUrl: 'https://x.test/clef',
+      }),
+      apiKey: 'k',
+    };
+    const inner = jevFetch(() => 0.9, bodies);
+    const { model } = await compactSession(transcript(), config, async (url, init) => {
+      urls.push(url);
+      return inner(url, init);
+    });
+    expect(model).toBe('clef');
+    expect(urls).toEqual(['https://x.test/clef']);
+    expect(JSON.parse(bodies[0]!).model).toBe('clef');
+  });
+
+  it('uses the primary model when the history fits', async () => {
+    const urls: string[] = [];
+    const config = {
+      ...resolveHookConfig({ preserveRecentMessages: 1, baseUrl: 'https://x.test/flash', model: 'clef-flash', fallbackModel: 'clef' }),
+      apiKey: 'k',
+    };
+    const inner = jevFetch(() => 0.9);
+    const { model } = await compactSession(transcript(), config, async (url, init) => {
+      urls.push(url);
+      return inner(url, init);
+    });
+    expect(model).toBe('clef-flash');
+    expect(urls).toEqual(['https://x.test/flash']);
+  });
+
+  it('does not retry on other errors', async () => {
+    const urls: string[] = [];
+    const config = {
+      ...resolveHookConfig({ preserveRecentMessages: 1, model: 'clef-flash', fallbackModel: 'clef' }),
+      apiKey: 'k',
+    };
+    await expect(
+      compactSession(transcript(), config, async (url) => {
+        urls.push(url);
+        return { status: 503, ok: false, text: 'down' };
+      }),
+    ).rejects.toThrow(/503/);
+    expect(urls).toHaveLength(1);
+  });
+});

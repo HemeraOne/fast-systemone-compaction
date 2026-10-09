@@ -58,7 +58,24 @@ export type HookConfig = CompactOptions & {
   model: string;
   baseUrl?: string;
   invalidBaseUrl?: string;
+  /** A bigger-context model to retry with when the history does not fit the primary one. */
+  fallback?: {
+    model: string;
+    baseUrl?: string;
+    invalidBaseUrl?: string;
+    maxStateTokens: number;
+    maxRequestTokens: number;
+  };
 };
+
+/** Defaults for the fallback tier, sized for a 64k-token window (Clef on Workers AI). */
+export const FALLBACK_DEFAULTS = { maxStateTokens: 55_000, maxRequestTokens: 62_000 } as const;
+
+/** The errors that mean the history did not fit the primary model's budget. */
+export function isTooLarge(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /history too large|leaves no room for questions/.test(message);
+}
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
   const value = options[key];
@@ -102,6 +119,19 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
   Object.assign(config, resolveBaseUrl(optionString(options, 'baseUrl')));
+  const fallbackModel = optionString(options, 'fallbackModel')?.trim();
+  if (fallbackModel) {
+    config.fallback = {
+      model: fallbackModel,
+      maxStateTokens: optionNumber(options, 'fallbackMaxStateTokens', FALLBACK_DEFAULTS.maxStateTokens),
+      maxRequestTokens: optionNumber(
+        options,
+        'fallbackMaxRequestTokens',
+        FALLBACK_DEFAULTS.maxRequestTokens,
+      ),
+      ...resolveBaseUrl(optionString(options, 'fallbackBaseUrl')),
+    };
+  }
   return config;
 }
 
@@ -177,6 +207,8 @@ export function toSessionMessages(
 export type SessionCompaction = {
   result: CompactResult;
   messages: SessionMessage[];
+  /** The model that answered (the fallback model when the primary one was too small). */
+  model?: string;
 };
 
 /**
@@ -201,12 +233,32 @@ export async function compactSession(
   if (!config.apiKey) {
     throw new Error('System One API key is not configured (set the apiKey option or TYPESAFE_API_KEY)');
   }
-  const result = await compact(
-    messages,
-    jevAsker(fetchFn, config.apiKey, config.model, config.baseUrl),
-    config,
-  );
-  return { result, messages: toSessionMessages(messages, result.messages) };
+  let result: CompactResult;
+  let model = config.model;
+  try {
+    result = await compact(
+      messages,
+      jevAsker(fetchFn, config.apiKey, config.model, config.baseUrl),
+      config,
+    );
+  } catch (error) {
+    const fallback = config.fallback;
+    if (!fallback || !isTooLarge(error)) throw error;
+    if (fallback.invalidBaseUrl) {
+      throw new Error(`invalid fallbackBaseUrl: ${fallback.invalidBaseUrl}`);
+    }
+    model = fallback.model;
+    result = await compact(
+      messages,
+      jevAsker(fetchFn, config.apiKey, fallback.model, fallback.baseUrl ?? config.baseUrl),
+      {
+        ...config,
+        maxStateTokens: fallback.maxStateTokens,
+        maxRequestTokens: fallback.maxRequestTokens,
+      },
+    );
+  }
+  return { result, messages: toSessionMessages(messages, result.messages), model };
 }
 
 function percent(ratio: number): string {
@@ -310,17 +362,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
       loggedInvalidBaseUrl = true;
       $.ui.log(`invalid baseUrl, falling back to the built-in summary: ${configured.invalidBaseUrl}`);
     }
-    const marker = rulesMode
+    let marker = rulesMode
       ? 'rules'
       : backendMarker(configured.invalidBaseUrl ?? configured.baseUrl ?? SYSTEM_ONE_URL, configured.model);
     try {
       const config = rulesMode
         ? configured
         : { ...configured, apiKey: await getApiKey($, configured) };
-      const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
+      const { result, messages, model } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
+      if (!rulesMode && model && configured.fallback && model === configured.fallback.model && model !== configured.model) {
+        marker = backendMarker(
+          configured.fallback.baseUrl ?? configured.baseUrl ?? SYSTEM_ONE_URL,
+          model,
+        );
+      }
       for (const line of decisionLogLines(result)) $.ui.log(line);
       const summary = rulesMode ? summarizeRules(result) : summarize(result);
       if (reductionRatio(result) < config.minReductionRatio) {
