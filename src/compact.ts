@@ -70,6 +70,9 @@ export function questionsFor(call: ToolCall): JevQuestions {
  * Splits the candidate calls into batches whose questions, together with the
  * (always complete) state, fit one request.
  */
+/** System One endpoints (Clef on Workers AI) accept at most 64 questions per request: 2 per call. */
+export const MAX_CALLS_PER_BATCH = 32;
+
 export function batchCalls(
   calls: readonly ToolCall[],
   stateTokens: number,
@@ -81,7 +84,10 @@ export function batchCalls(
   let currentTokens = 0;
   for (const call of calls) {
     const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
-    if (current.length > 0 && currentTokens + tokens > budget) {
+    if (
+      current.length > 0 &&
+      (currentTokens + tokens > budget || current.length >= MAX_CALLS_PER_BATCH)
+    ) {
       batches.push(current);
       current = [];
       currentTokens = 0;

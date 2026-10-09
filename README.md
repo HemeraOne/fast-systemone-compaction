@@ -117,6 +117,25 @@ put it in a source file.
 per-reason decision counts, the state size in estimated tokens, which fitting
 stage was needed, and the number of requests.
 
+## Cloudflare Clef
+
+This fork also works with Cloudflare's Clef decision models on Workers AI. The plugin unwraps
+Cloudflare's `{ result, success, errors, messages }` response envelope. It also caps each request at
+32 tool calls, because Workers AI accepts at most 64 questions per request.
+
+```json
+{
+  "baseUrl": "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/cloudflare/clef-flash",
+  "apiKey": "<Cloudflare API token with Workers AI permission>",
+  "model": "clef-flash",
+  "maxStateTokens": 55000,
+  "maxRequestTokens": 62000
+}
+```
+
+Use `clef` in place of `clef-flash`, in both the URL and `model`, for the larger 27B model.
+Clef's hosted context window is 65,536 tokens.
+
 ## Limitations
 
 - Only tool calls and results are candidates; text messages are never removed

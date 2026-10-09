@@ -537,3 +537,19 @@ describe('HTTP client', () => {
     );
   });
 });
+
+import { parseJevResponse as parseCf } from '../src/request.js';
+import { batchCalls as batchCf, MAX_CALLS_PER_BATCH } from '../src/compact.js';
+import { describe as d2, it as i2, expect as e2 } from 'vitest';
+d2('cloudflare clef compatibility', () => {
+  i2('unwraps the Workers AI result envelope', () => {
+    const body = JSON.stringify({ result: { model: 'clef-flash', answers: { a: { noul: 0.7 } } }, success: true, errors: [], messages: [] });
+    e2(parseCf(200, true, body).answers).toEqual({ a: { noul: 0.7 } });
+  });
+  i2('caps batches at 64 questions', () => {
+    const calls = Array.from({ length: 70 }, (_, i) => ({ id: `c${i}`, tool: 'Read', resultChars: 10 })) as any;
+    const batches = batchCf(calls, 0, { maxRequestTokens: 1_000_000 });
+    e2(batches.every((b) => b.length <= MAX_CALLS_PER_BATCH)).toBe(true);
+    e2(batches.flat().length).toBe(70);
+  });
+});

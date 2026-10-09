@@ -76,6 +76,17 @@ export function parseJevResponse(
   } catch {
     throw new Error('Jev returned malformed JSON');
   }
+  // Cloudflare Workers AI REST wraps the System One body in { result, success, errors, messages }.
+  if (
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    !('answers' in parsed) &&
+    'result' in parsed &&
+    parsed.result !== null &&
+    typeof parsed.result === 'object'
+  ) {
+    parsed = parsed.result;
+  }
   if (
     parsed === null ||
     typeof parsed !== 'object' ||
